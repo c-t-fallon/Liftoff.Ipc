@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="IpcDemo.Client/IpcDemo.Client.csproj" />
+  <Project Path="IpcDemo.Contracts/IpcDemo.Contracts.csproj" />
+  <Project Path="IpcDemo.Server/IpcDemo.Server.csproj" />
+  <Project Path="IpcDemo.Tests.Integration/IpcDemo.Tests.Integration.csproj" />
+  <Project Path="IpcDemo.Tests.Unit/IpcDemo.Tests.Unit.csproj" />
+  <Project Path="Liftoff.Ipc/Liftoff.Ipc.csproj" />
+</Solution>
