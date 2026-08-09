@@ -10,7 +10,10 @@ Console.CancelKeyPress += (_, eventArgs) =>
 };
 
 Console.WriteLine("IPC demo server. Press Ctrl+C to stop.");
-await using var server = IpcServer.Create(DemoIpc.PipeName);
+var hasSession = IpcSession.TryFromEnvironment(out var session);
+await using var server = hasSession
+    ? IpcServer.Create(session!)
+    : IpcServer.Create(DemoIpc.PipeName);
 server.RegisterHandlersFromAssemblyContaining<AnalyzeModelHandler>();
 
 try
@@ -28,10 +31,9 @@ static async Task PublishModelChangesAsync(
     CancellationToken cancellationToken)
 {
     var sequence = 0;
-    using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
-
-    while (await timer.WaitForNextTickAsync(cancellationToken))
+    while (!cancellationToken.IsCancellationRequested)
     {
+        await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
         sequence++;
         await publisher.PublishAsync(
             new ModelChanged(sequence, $"Element-{sequence}", DateTimeOffset.UtcNow),

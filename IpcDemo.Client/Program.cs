@@ -8,16 +8,19 @@ Console.CancelKeyPress += (_, eventArgs) =>
     shutdown.Cancel();
 };
 
-await using IIpcClient client = await IpcClient.ConnectAsync(
-    DemoIpc.PipeName,
-    shutdown.Token);
+var hasSession = IpcSession.TryFromEnvironment(out var session);
+await using IIpcClient client = hasSession
+    ? await IpcClient.ConnectAsync(session!, shutdown.Token)
+    : await IpcClient.ConnectAsync(DemoIpc.PipeName, shutdown.Token);
 
 var shouldFail = args.Contains("--fail", StringComparer.OrdinalIgnoreCase);
 var showEvents = args.Contains("--events", StringComparer.OrdinalIgnoreCase);
 var cancelAfterArgument = args.FirstOrDefault(argument =>
     argument.StartsWith("--cancel-after=", StringComparison.OrdinalIgnoreCase));
 if (cancelAfterArgument is not null
-    && int.TryParse(cancelAfterArgument.Split('=', 2)[1], out var cancelAfterMilliseconds))
+    && int.TryParse(
+        cancelAfterArgument.Substring(cancelAfterArgument.IndexOf('=') + 1),
+        out var cancelAfterMilliseconds))
 {
     shutdown.CancelAfter(cancelAfterMilliseconds);
 }
@@ -60,7 +63,7 @@ catch (Exception exception)
 }
 finally
 {
-    await eventLifetime.CancelAsync();
+    eventLifetime.Cancel();
     await eventReader;
 }
 

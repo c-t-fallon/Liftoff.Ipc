@@ -19,7 +19,7 @@ public sealed class IpcBehaviorTests
         Assert.Equal("Integration Model", result.ModelName);
         Assert.Equal(500, result.ElementsAnalyzed);
         Assert.Equal(4, progress.Values.Count);
-        Assert.Equal(100, progress.Values[^1].Percent);
+        Assert.Equal(100, progress.Values[progress.Values.Count - 1].Percent);
     }
 
     [Fact]
@@ -102,6 +102,73 @@ public sealed class IpcBehaviorTests
         Assert.Contains("No handler is registered", exception.Message);
     }
 
+    [Fact]
+    public async Task Unauthenticated_client_is_rejected_without_disrupting_the_server()
+    {
+        var session = IpcSession.Create();
+        await using var server = IpcServer.Create(
+            session,
+            options => options.AuthenticationTimeout = TimeSpan.FromMilliseconds(500));
+        server.RegisterHandlersFromAssemblyContaining<AnalyzeHandler>();
+        await server.StartAsync();
+        await using var unauthenticatedClient = await IpcClient.ConnectAsync(session.PipeName);
+
+        await Assert.ThrowsAnyAsync<IpcException>(() =>
+            unauthenticatedClient.RequestAsync(new Analyze("Rogue Client")));
+
+        await using var authenticatedClient = await IpcClient.ConnectAsync(session);
+        var result = await authenticatedClient.RequestAsync(new Analyze("Trusted Client"));
+
+        Assert.Equal("Trusted Client", result.ModelName);
+    }
+
+    [Fact]
+    public async Task Authenticated_client_rejects_a_server_without_the_session_key()
+    {
+        var session = IpcSession.Create();
+        await using var unauthenticatedServer = IpcServer.Create(session.PipeName);
+        await unauthenticatedServer.StartAsync();
+        var options = new IpcClientOptions
+        {
+            AuthenticationTimeout = TimeSpan.FromMilliseconds(200)
+        };
+
+        var exception = await Assert.ThrowsAsync<IpcAuthenticationException>(() =>
+            IpcClient.ConnectAsync(session, options));
+
+        Assert.Contains("authentication", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Client_with_a_different_session_key_is_rejected()
+    {
+        var serverSession = IpcSession.Create();
+        var clientSession = IpcSession.Create(serverSession.PipeName);
+        await using var server = IpcServer.Create(serverSession);
+        await server.StartAsync();
+
+        await Assert.ThrowsAsync<IpcAuthenticationException>(() =>
+            IpcClient.ConnectAsync(clientSession));
+    }
+
+    [Fact]
+    public void Session_can_configure_a_child_without_printing_its_secret()
+    {
+        var session = IpcSession.Create();
+        var startInfo = new ProcessStartInfo("child.exe");
+
+        session.ConfigureChildProcess(startInfo);
+
+        var encodedKey = startInfo.EnvironmentVariables[
+            IpcSession.AuthenticationKeyEnvironmentVariable];
+        Assert.Equal(
+            session.PipeName,
+            startInfo.EnvironmentVariables[IpcSession.PipeNameEnvironmentVariable]);
+        Assert.NotNull(encodedKey);
+        Assert.Equal(32, Convert.FromBase64String(encodedKey).Length);
+        Assert.DoesNotContain(encodedKey, session.ToString());
+    }
+
     private sealed class RecordingProgress<T> : IProgress<T>
     {
         private readonly ConcurrentQueue<T> _values = new();
@@ -111,26 +178,26 @@ public sealed class IpcBehaviorTests
 
     private sealed class TestApplication : IAsyncDisposable
     {
-        private TestApplication(string pipeName, IpcServer server)
+        private TestApplication(IpcSession session, IpcServer server)
         {
-            PipeName = pipeName;
+            Session = session;
             Server = server;
         }
 
-        public string PipeName { get; }
+        public IpcSession Session { get; }
         public IpcServer Server { get; }
 
         public static async Task<TestApplication> StartAsync()
         {
-            var pipeName = $"Liftoff.Ipc.Tests.{Guid.NewGuid():N}";
-            var server = IpcServer.Create(pipeName);
+            var session = IpcSession.Create();
+            var server = IpcServer.Create(session);
             server.RegisterHandlersFromAssemblyContaining<AnalyzeHandler>();
             await server.StartAsync();
-            return new TestApplication(pipeName, server);
+            return new TestApplication(session, server);
         }
 
         public Task<IpcClient> ConnectClientAsync() =>
-            IpcClient.ConnectAsync(PipeName);
+            IpcClient.ConnectAsync(Session);
 
         public ValueTask DisposeAsync() => Server.DisposeAsync();
     }

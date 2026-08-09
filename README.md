@@ -1,12 +1,36 @@
 # Liftoff.Ipc
 
-`Liftoff.Ipc` is a small, dependency-free library for typed request/response and server-published events between local .NET processes over Windows named pipes. The demo models a parent application hosting the server and a distributed child executable connecting as its client.
+`Liftoff.Ipc` is a small library for typed request/response and server-published events between local .NET processes over Windows named pipes. The demo models a parent application hosting the server and a distributed child executable connecting as its client.
+
+The NuGet package targets .NET Framework 4.8, .NET 8, and .NET 10. Endpoints may use different target frameworks: for example, a Revit 2024 add-in on .NET Framework 4.8 can communicate with a child process on .NET 8 while both reference the corresponding build of the same contracts package.
 
 The library keeps correlation IDs, acknowledgement timeouts, framing, serialization, heartbeats, cancellation, subscriptions, and pipe lifecycle behind one public namespace:
 
 ```csharp
 using Liftoff.Ipc;
 ```
+
+## Authenticated sessions
+
+For parent/child applications, create one authenticated session before launching the child. A session uses an unpredictable pipe name, a 256-bit key, current-user pipe isolation, and a mutual HMAC-SHA256 handshake. The key is never sent over the pipe, and application messages are not accepted until both endpoints authenticate.
+
+```csharp
+var session = IpcSession.Create();
+var child = new ProcessStartInfo("Child.exe");
+session.ConfigureChildProcess(child);
+Process.Start(child);
+
+await using var server = IpcServer.Create(session);
+```
+
+The child reads the session from its inherited environment and may act as either client or server:
+
+```csharp
+var session = IpcSession.FromEnvironment();
+await using var client = await IpcClient.ConnectAsync(session);
+```
+
+Fixed-name overloads remain available for independently configured applications. They restrict access to the current Windows user by default but do not authenticate same-user peers; authenticated `IpcSession` overloads are recommended whenever one process launches the other.
 
 ## Shared contracts
 
@@ -110,21 +134,21 @@ The server's pipe reader never runs application handlers. It acknowledges and qu
 In one terminal:
 
 ```powershell
-dotnet run --project IpcDemo.Server
+dotnet run --project IpcDemo.Server --framework net10.0
 ```
 
 In another:
 
 ```powershell
-dotnet run --project IpcDemo.Client
+dotnet run --project IpcDemo.Client --framework net10.0
 ```
 
 Additional scenarios:
 
 ```powershell
-dotnet run --project IpcDemo.Client -- --fail
-dotnet run --project IpcDemo.Client -- --cancel-after=1200
-dotnet run --project IpcDemo.Client -- --events
+dotnet run --project IpcDemo.Client --framework net10.0 -- --fail
+dotnet run --project IpcDemo.Client --framework net10.0 -- --cancel-after=1200
+dotnet run --project IpcDemo.Client --framework net10.0 -- --events
 ```
 
 ## Tests
@@ -133,7 +157,7 @@ dotnet run --project IpcDemo.Client -- --events
 dotnet test IpcDemo.slnx
 ```
 
-- `IpcDemo.Tests.Integration` tests only the public library API through real operating-system named pipes. Test-owned CLR contracts and handlers exercise reflection discovery, requests, progress, errors, cancellation, reconnection, event subscription, publication, and acknowledged unsubscription.
+- `IpcDemo.Tests.Integration` runs on .NET Framework 4.8, .NET 8, and .NET 10 and tests only the public library API through real operating-system named pipes. Test-owned CLR contracts and handlers exercise reflection discovery, requests, progress, errors, cancellation, reconnection, event subscription, publication, and acknowledged unsubscription.
 - `IpcDemo.Tests.Unit` covers internal framing and request coordination in memory. These focused implementation tests are deliberately separate from the stable public behavior suite.
 
 ## Deliberate boundary

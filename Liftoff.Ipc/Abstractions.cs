@@ -50,11 +50,15 @@ public sealed class IpcRequestContext
 public sealed class IpcClientOptions
 {
     public TimeSpan AcknowledgementTimeout { get; set; } = TimeSpan.FromSeconds(3);
+    public TimeSpan AuthenticationTimeout { get; set; } = TimeSpan.FromSeconds(5);
+    public bool CurrentUserOnly { get; set; } = true;
 }
 
 public sealed class IpcServerOptions
 {
     public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(1);
+    public TimeSpan AuthenticationTimeout { get; set; } = TimeSpan.FromSeconds(5);
+    public bool CurrentUserOnly { get; set; } = true;
 }
 
 public class IpcException(string message, Exception? innerException = null)
@@ -68,4 +72,16 @@ public sealed class IpcDisconnectedException : IpcException
     public IpcDisconnectedException(string message, Exception innerException) : base(message, innerException) { }
 }
 
-public sealed class IpcConfigurationException(string message) : IpcException(message);
+public sealed class IpcAuthenticationException : IpcException
+{
+    public IpcAuthenticationException(string message) : base(message) { }
+    public IpcAuthenticationException(string message, Exception innerException)
+        : base(message, innerException) { }
+}
+
+public sealed class IpcConfigurationException : IpcException
+{
+    public IpcConfigurationException(string message) : base(message) { }
+    public IpcConfigurationException(string message, Exception innerException)
+        : base(message, innerException) { }
+}

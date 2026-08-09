@@ -37,8 +37,39 @@ public sealed class IpcClient : IIpcClient
     public static Task<IpcClient> ConnectAsync(
         string pipeName,
         IpcClientOptions options,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateConnectionArguments(pipeName, options);
+        return ConnectAsync(
+            new NamedPipeTransport(pipeName, options),
+            options,
+            cancellationToken);
+    }
+
+    public static Task<IpcClient> ConnectAsync(
+        IpcSession session,
         CancellationToken cancellationToken = default) =>
-        ConnectAsync(new NamedPipeTransport(pipeName), options, cancellationToken);
+        ConnectAsync(session, new IpcClientOptions(), cancellationToken);
+
+    public static Task<IpcClient> ConnectAsync(
+        IpcSession session,
+        IpcClientOptions options,
+        CancellationToken cancellationToken = default)
+    {
+        if (session is null)
+        {
+            throw new ArgumentNullException(nameof(session));
+        }
+
+        ValidateConnectionArguments(session.PipeName, options);
+        return ConnectAsync(
+            new NamedPipeTransport(
+                session.PipeName,
+                options,
+                session.CopyAuthenticationKey()),
+            options,
+            cancellationToken);
+    }
 
     public DateTimeOffset? LastHeartbeatAt { get; private set; }
 
@@ -62,9 +93,14 @@ public sealed class IpcClient : IIpcClient
             await _transport.SendAsync(
                 IpcEnvelope.Create(MessageTypes.ExecuteRequest, requestId, execute),
                 cancellationToken);
-            await pending.Accepted.Task.WaitAsync(_acknowledgementTimeout, cancellationToken);
+            await AsyncCompatibility.WaitWithTimeoutAsync(
+                pending.Accepted.Task,
+                _acknowledgementTimeout,
+                cancellationToken);
 
-            var result = await pending.Completion.Task.WaitAsync(cancellationToken);
+            var result = await AsyncCompatibility.WaitWithCancellationAsync(
+                pending.Completion.Task,
+                cancellationToken);
             return result.Deserialize<TResponse>(IpcProtocol.JsonOptions)
                 ?? throw new InvalidDataException($"The server returned no {typeof(TResponse).Name} result.");
         }
@@ -99,7 +135,10 @@ public sealed class IpcClient : IIpcClient
                     subscriptionId,
                     new SubscribeRequest(ContractName.For<TEvent>())),
                 cancellationToken);
-            await state.Accepted.Task.WaitAsync(_acknowledgementTimeout, cancellationToken);
+            await AsyncCompatibility.WaitWithTimeoutAsync(
+                state.Accepted.Task,
+                _acknowledgementTimeout,
+                cancellationToken);
             return subscription;
         }
         catch
@@ -111,7 +150,7 @@ public sealed class IpcClient : IIpcClient
 
     public async ValueTask DisposeAsync()
     {
-        await _lifetime.CancelAsync();
+        await AsyncCompatibility.CancelAsync(_lifetime);
 
         var disposed = new IpcDisconnectedException("The IPC client was disposed.");
         foreach (var pending in _pending.Values)
@@ -252,6 +291,33 @@ public sealed class IpcClient : IIpcClient
         catch { }
     }
 
+    private static void ValidateConnectionArguments(string pipeName, IpcClientOptions options)
+    {
+        if (string.IsNullOrWhiteSpace(pipeName))
+        {
+            throw new ArgumentException("The pipe name cannot be empty.", nameof(pipeName));
+        }
+
+        if (options is null)
+        {
+            throw new ArgumentNullException(nameof(options));
+        }
+
+        if (options.AcknowledgementTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentException(
+                "The acknowledgement timeout must be positive.",
+                nameof(options));
+        }
+
+        if (options.AuthenticationTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentException(
+                "The authentication timeout must be positive.",
+                nameof(options));
+        }
+    }
+
     private async ValueTask RemoveSubscriptionAsync(Guid subscriptionId)
     {
         if (!_subscriptions.TryGetValue(subscriptionId, out var subscription))
@@ -264,7 +330,10 @@ public sealed class IpcClient : IIpcClient
             await _transport.SendAsync(
                 IpcEnvelope.Create(MessageTypes.UnsubscribeRequest, subscriptionId, new { }),
                 CancellationToken.None);
-            await subscription.Unsubscribed.Task.WaitAsync(_acknowledgementTimeout);
+            await AsyncCompatibility.WaitWithTimeoutAsync(
+                subscription.Unsubscribed.Task,
+                _acknowledgementTimeout,
+                CancellationToken.None);
         }
         catch { }
         finally

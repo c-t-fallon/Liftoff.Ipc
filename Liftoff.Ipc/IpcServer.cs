@@ -4,6 +4,10 @@ using System.Reflection;
 using System.Text.Json;
 using System.Threading.Channels;
 using Liftoff.Ipc.Internal;
+#if NETFRAMEWORK
+using System.Security.AccessControl;
+using System.Security.Principal;
+#endif
 
 namespace Liftoff.Ipc;
 
@@ -11,26 +15,53 @@ public sealed class IpcServer : IAsyncDisposable
 {
     private readonly string _pipeName;
     private readonly IpcServerOptions _options;
+    private readonly byte[]? _authenticationKey;
     private readonly ConcurrentDictionary<string, IRequestHandlerInvoker> _handlers = new();
     private readonly ConcurrentDictionary<Guid, ClientSession> _sessions = new();
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private CancellationTokenSource? _lifetime;
     private Task? _runTask;
 
-    private IpcServer(string pipeName, IpcServerOptions options)
+    private IpcServer(
+        string pipeName,
+        IpcServerOptions options,
+        byte[]? authenticationKey)
     {
         _pipeName = pipeName;
         _options = options;
+        _authenticationKey = authenticationKey;
     }
 
     public static IpcServer Create(
         string pipeName,
         Action<IpcServerOptions>? configure = null)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(pipeName);
+        if (string.IsNullOrWhiteSpace(pipeName))
+        {
+            throw new ArgumentException("The pipe name cannot be empty.", nameof(pipeName));
+        }
         var options = new IpcServerOptions();
         configure?.Invoke(options);
-        return new IpcServer(pipeName, options);
+        ValidateOptions(options);
+        return new IpcServer(pipeName, options, authenticationKey: null);
+    }
+
+    public static IpcServer Create(
+        IpcSession session,
+        Action<IpcServerOptions>? configure = null)
+    {
+        if (session is null)
+        {
+            throw new ArgumentNullException(nameof(session));
+        }
+
+        var options = new IpcServerOptions();
+        configure?.Invoke(options);
+        ValidateOptions(options);
+        return new IpcServer(
+            session.PipeName,
+            options,
+            session.CopyAuthenticationKey());
     }
 
     public void RegisterHandler<TRequest, TResponse>(
@@ -47,7 +78,10 @@ public sealed class IpcServer : IAsyncDisposable
         Assembly assembly,
         Func<Type, object>? handlerFactory = null)
     {
-        ArgumentNullException.ThrowIfNull(assembly);
+        if (assembly is null)
+        {
+            throw new ArgumentNullException(nameof(assembly));
+        }
 
         foreach (var implementationType in assembly.GetTypes()
                      .Where(type => type is { IsAbstract: false, IsInterface: false }))
@@ -113,7 +147,7 @@ public sealed class IpcServer : IAsyncDisposable
                 return;
             }
 
-            await _lifetime.CancelAsync();
+            await AsyncCompatibility.CancelAsync(_lifetime);
             runTask = _runTask;
         }
         finally
@@ -123,7 +157,7 @@ public sealed class IpcServer : IAsyncDisposable
 
         try
         {
-            await runTask.WaitAsync(cancellationToken);
+            await AsyncCompatibility.WaitWithCancellationAsync(runTask, cancellationToken);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
     }
@@ -170,14 +204,25 @@ public sealed class IpcServer : IAsyncDisposable
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            await using var pipe = new NamedPipeServerStream(
-                _pipeName,
-                PipeDirection.InOut,
-                maxNumberOfServerInstances: 1,
-                PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous);
+            using var pipe = CreatePipe();
 
             await pipe.WaitForConnectionAsync(cancellationToken);
+            if (_authenticationKey is not null)
+            {
+                try
+                {
+                    await IpcAuthenticator.AuthenticateServerAsync(
+                        pipe,
+                        _authenticationKey,
+                        _options.AuthenticationTimeout,
+                        cancellationToken);
+                }
+                catch (IpcAuthenticationException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    continue;
+                }
+            }
+
             var sessionId = Guid.NewGuid();
             var session = new ClientSession(pipe, _handlers, _options.HeartbeatInterval);
             _sessions.TryAdd(sessionId, session);
@@ -217,7 +262,7 @@ public sealed class IpcServer : IAsyncDisposable
             catch (IOException) { }
             finally
             {
-                await lifetime.CancelAsync();
+                await AsyncCompatibility.CancelAsync(lifetime);
                 _workQueue.Writer.TryComplete();
                 foreach (var operation in _operations.Values)
                 {
@@ -359,7 +404,7 @@ public sealed class IpcServer : IAsyncDisposable
             SubscribeRequest request,
             CancellationToken cancellationToken)
         {
-            if (_subscriptions.ContainsKey(subscriptionId))
+            if (!_subscriptions.TryAdd(subscriptionId, request.EventContract))
             {
                 await SendAsync(
                     IpcEnvelope.Create(
@@ -370,13 +415,20 @@ public sealed class IpcServer : IAsyncDisposable
                 return;
             }
 
-            await SendAsync(
-                IpcEnvelope.Create(
-                    MessageTypes.SubscriptionAccepted,
-                    subscriptionId,
-                    new SubscriptionAccepted(request.EventContract, DateTimeOffset.UtcNow)),
-                cancellationToken);
-            _subscriptions.TryAdd(subscriptionId, request.EventContract);
+            try
+            {
+                await SendAsync(
+                    IpcEnvelope.Create(
+                        MessageTypes.SubscriptionAccepted,
+                        subscriptionId,
+                        new SubscriptionAccepted(request.EventContract, DateTimeOffset.UtcNow)),
+                    cancellationToken);
+            }
+            catch
+            {
+                _subscriptions.TryRemove(subscriptionId, out _);
+                throw;
+            }
         }
 
         private async Task ProcessWorkQueueAsync(CancellationToken cancellationToken)
@@ -431,9 +483,9 @@ public sealed class IpcServer : IAsyncDisposable
 
         private async Task SendHeartbeatsAsync(CancellationToken cancellationToken)
         {
-            using var timer = new PeriodicTimer(heartbeatInterval);
-            while (await timer.WaitForNextTickAsync(cancellationToken))
+            while (!cancellationToken.IsCancellationRequested)
             {
+                await Task.Delay(heartbeatInterval, cancellationToken);
                 await SendAsync(
                     IpcEnvelope.Create(MessageTypes.Heartbeat, null, new Heartbeat(DateTimeOffset.UtcNow)),
                     cancellationToken);
@@ -478,6 +530,70 @@ public sealed class IpcServer : IAsyncDisposable
             JsonElement Arguments,
             IRequestHandlerInvoker Handler,
             CancellationTokenSource Cancellation);
+    }
+
+    private NamedPipeServerStream CreatePipe()
+    {
+        var pipeOptions = PipeOptions.Asynchronous;
+#if NETFRAMEWORK
+        if (!_options.CurrentUserOnly)
+        {
+            return new NamedPipeServerStream(
+                _pipeName,
+                PipeDirection.InOut,
+                maxNumberOfServerInstances: 1,
+                PipeTransmissionMode.Byte,
+                pipeOptions);
+        }
+
+        using var identity = WindowsIdentity.GetCurrent();
+        var user = identity.User
+            ?? throw new IpcConfigurationException("The current Windows user has no security identifier.");
+        var security = new PipeSecurity();
+        security.SetOwner(user);
+        security.AddAccessRule(new PipeAccessRule(
+            user,
+            PipeAccessRights.FullControl,
+            AccessControlType.Allow));
+        return new NamedPipeServerStream(
+            _pipeName,
+            PipeDirection.InOut,
+            maxNumberOfServerInstances: 1,
+            PipeTransmissionMode.Byte,
+            pipeOptions,
+            inBufferSize: 0,
+            outBufferSize: 0,
+            security);
+#else
+        if (_options.CurrentUserOnly)
+        {
+            pipeOptions |= PipeOptions.CurrentUserOnly;
+        }
+
+        return new NamedPipeServerStream(
+            _pipeName,
+            PipeDirection.InOut,
+            maxNumberOfServerInstances: 1,
+            PipeTransmissionMode.Byte,
+            pipeOptions);
+#endif
+    }
+
+    private static void ValidateOptions(IpcServerOptions options)
+    {
+        if (options.HeartbeatInterval <= TimeSpan.Zero)
+        {
+            throw new ArgumentException(
+                "The heartbeat interval must be positive.",
+                nameof(options));
+        }
+
+        if (options.AuthenticationTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentException(
+                "The authentication timeout must be positive.",
+                nameof(options));
+        }
     }
 
     private interface IRequestHandlerInvoker

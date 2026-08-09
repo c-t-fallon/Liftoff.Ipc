@@ -10,7 +10,10 @@ internal interface IIpcTransport : IAsyncDisposable
     IAsyncEnumerable<IpcEnvelope> ReadAllAsync(CancellationToken cancellationToken = default);
 }
 
-internal sealed class NamedPipeTransport(string pipeName) : IIpcTransport
+internal sealed class NamedPipeTransport(
+    string pipeName,
+    IpcClientOptions options,
+    byte[]? authenticationKey = null) : IIpcTransport
 {
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private NamedPipeClientStream? _pipe;
@@ -22,20 +25,37 @@ internal sealed class NamedPipeTransport(string pipeName) : IIpcTransport
             return;
         }
 
+        var pipeOptions = PipeOptions.Asynchronous;
+#if !NETFRAMEWORK
+        if (options.CurrentUserOnly)
+        {
+            pipeOptions |= PipeOptions.CurrentUserOnly;
+        }
+#endif
+
         var pipe = new NamedPipeClientStream(
             ".",
             pipeName,
             PipeDirection.InOut,
-            PipeOptions.Asynchronous);
+            pipeOptions);
 
         try
         {
             await pipe.ConnectAsync(cancellationToken);
+            if (authenticationKey is not null)
+            {
+                await IpcAuthenticator.AuthenticateClientAsync(
+                    pipe,
+                    authenticationKey,
+                    options.AuthenticationTimeout,
+                    cancellationToken);
+            }
+
             _pipe = pipe;
         }
         catch
         {
-            await pipe.DisposeAsync();
+            pipe.Dispose();
             throw;
         }
     }
@@ -70,14 +90,11 @@ internal sealed class NamedPipeTransport(string pipeName) : IIpcTransport
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (_pipe is not null)
-        {
-            await _pipe.DisposeAsync();
-        }
-
+        _pipe?.Dispose();
         _writeGate.Dispose();
+        return default;
     }
 
     private NamedPipeClientStream GetConnectedPipe() =>

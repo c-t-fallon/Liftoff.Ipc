@@ -29,6 +29,10 @@ internal static class ContractName
 
 internal static class MessageTypes
 {
+    public const string AuthenticationHello = "authentication-hello";
+    public const string AuthenticationChallenge = "authentication-challenge";
+    public const string AuthenticationProof = "authentication-proof";
+    public const string AuthenticationAccepted = "authentication-accepted";
     public const string ExecuteRequest = "execute-request";
     public const string RequestAccepted = "request-accepted";
     public const string OperationProgress = "operation-progress";
@@ -67,6 +71,10 @@ internal sealed record SubscriptionAccepted(string EventContract, DateTimeOffset
 internal sealed record SubscriptionRejected(string Error);
 internal sealed record UnsubscriptionAccepted(DateTimeOffset AcceptedAt);
 internal sealed record EventPublished(JsonElement Data);
+internal sealed record AuthenticationHello(byte[] ClientNonce);
+internal sealed record AuthenticationChallenge(byte[] ServerNonce, byte[] ServerProof);
+internal sealed record AuthenticationProof(byte[] ClientProof);
+internal sealed record AuthenticationAccepted(DateTimeOffset AcceptedAt);
 
 internal static class LengthPrefixedJson
 {
@@ -84,8 +92,8 @@ internal static class LengthPrefixedJson
 
         var header = new byte[sizeof(int)];
         BinaryPrimitives.WriteInt32BigEndian(header, payload.Length);
-        await stream.WriteAsync(header, cancellationToken);
-        await stream.WriteAsync(payload, cancellationToken);
+        await stream.WriteAsync(header, 0, header.Length, cancellationToken);
+        await stream.WriteAsync(payload, 0, payload.Length, cancellationToken);
         await stream.FlushAsync(cancellationToken);
     }
 
@@ -112,20 +120,29 @@ internal static class LengthPrefixedJson
         }
 
         var payload = new byte[length];
-        await stream.ReadExactlyAsync(payload, cancellationToken);
+        var payloadBytes = await ReadExactlyOrEofAsync(stream, payload, cancellationToken);
+        if (payloadBytes != payload.Length)
+        {
+            throw new EndOfStreamException("The pipe closed in the middle of a frame payload.");
+        }
+
         return JsonSerializer.Deserialize<IpcEnvelope>(payload, IpcProtocol.JsonOptions)
             ?? throw new InvalidDataException("The frame did not contain an IPC envelope.");
     }
 
     private static async ValueTask<int> ReadExactlyOrEofAsync(
         Stream stream,
-        Memory<byte> buffer,
+        byte[] buffer,
         CancellationToken cancellationToken)
     {
         var total = 0;
         while (total < buffer.Length)
         {
-            var read = await stream.ReadAsync(buffer[total..], cancellationToken);
+            var read = await stream.ReadAsync(
+                buffer,
+                total,
+                buffer.Length - total,
+                cancellationToken);
             if (read == 0)
             {
                 break;
