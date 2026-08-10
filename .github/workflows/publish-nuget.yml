@@ -10,7 +10,7 @@ permissions:
 jobs:
   publish:
     name: Build, verify, and publish
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     environment: nuget.org
     permissions:
       contents: read
@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Check out the released source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ github.event.release.tag_name }}
 
