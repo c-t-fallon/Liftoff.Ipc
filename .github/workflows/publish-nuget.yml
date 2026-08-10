@@ -66,13 +66,14 @@ jobs:
           $serverErr = Join-Path $env:RUNNER_TEMP 'liftoff-ipc-server.err'
 
           $server = Start-Process -FilePath $net48Server `
+            -ArgumentList @('--allow-other-users') `
             -RedirectStandardOutput $serverOut `
             -RedirectStandardError $serverErr `
             -PassThru `
             -WindowStyle Hidden
           try {
             Start-Sleep -Milliseconds 750
-            & dotnet $net10Client
+            & dotnet $net10Client --allow-other-users
             if ($LASTEXITCODE -ne 0) {
               throw "The net10 client could not communicate with the net48 server."
             }
@@ -84,14 +85,14 @@ jobs:
           }
 
           $server = Start-Process -FilePath 'dotnet' `
-            -ArgumentList @($net10Server) `
+            -ArgumentList @($net10Server, '--allow-other-users') `
             -RedirectStandardOutput $serverOut `
             -RedirectStandardError $serverErr `
             -PassThru `
             -WindowStyle Hidden
           try {
             Start-Sleep -Milliseconds 750
-            & $net48Client
+            & $net48Client --allow-other-users
             if ($LASTEXITCODE -ne 0) {
               throw "The net48 client could not communicate with the net10 server."
             }

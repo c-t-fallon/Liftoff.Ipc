@@ -9,9 +9,14 @@ Console.CancelKeyPress += (_, eventArgs) =>
 };
 
 var hasSession = IpcSession.TryFromEnvironment(out var session);
+var allowOtherUsers = args.Contains("--allow-other-users", StringComparer.OrdinalIgnoreCase);
+var clientOptions = new IpcClientOptions
+{
+    CurrentUserOnly = !allowOtherUsers
+};
 await using IIpcClient client = hasSession
     ? await IpcClient.ConnectAsync(session!, shutdown.Token)
-    : await IpcClient.ConnectAsync(DemoIpc.PipeName, shutdown.Token);
+    : await IpcClient.ConnectAsync(DemoIpc.PipeName, clientOptions, shutdown.Token);
 
 var shouldFail = args.Contains("--fail", StringComparer.OrdinalIgnoreCase);
 var showEvents = args.Contains("--events", StringComparer.OrdinalIgnoreCase);

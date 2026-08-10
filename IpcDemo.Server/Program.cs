@@ -11,9 +11,12 @@ Console.CancelKeyPress += (_, eventArgs) =>
 
 Console.WriteLine("IPC demo server. Press Ctrl+C to stop.");
 var hasSession = IpcSession.TryFromEnvironment(out var session);
+var allowOtherUsers = args.Contains("--allow-other-users", StringComparer.OrdinalIgnoreCase);
 await using var server = hasSession
     ? IpcServer.Create(session!)
-    : IpcServer.Create(DemoIpc.PipeName);
+    : IpcServer.Create(
+        DemoIpc.PipeName,
+        options => options.CurrentUserOnly = !allowOtherUsers);
 server.RegisterHandlersFromAssemblyContaining<AnalyzeModelHandler>();
 
 try
