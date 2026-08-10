@@ -1,8 +1,6 @@
 using System.Collections.Concurrent;
 using System.IO.Pipes;
 using System.Reflection;
-using System.Text.Json;
-using System.Threading.Channels;
 using Liftoff.Ipc.Internal;
 #if NETFRAMEWORK
 using System.Security.AccessControl;
@@ -11,7 +9,7 @@ using System.Security.Principal;
 
 namespace Liftoff.Ipc;
 
-public sealed class IpcServer : IAsyncDisposable
+public sealed class IpcServer : IDisposable
 {
     private readonly string _pipeName;
     private readonly IpcServerOptions _options;
@@ -21,6 +19,7 @@ public sealed class IpcServer : IAsyncDisposable
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private CancellationTokenSource? _lifetime;
     private Task? _runTask;
+    private int _disposed;
 
     private IpcServer(
         string pipeName,
@@ -70,7 +69,7 @@ public sealed class IpcServer : IAsyncDisposable
         RegisterInvoker(new RequestHandlerInvoker<TRequest, TResponse>(handler));
 
     public void RegisterHandler<TRequest, TResponse>(
-        Func<TRequest, IpcRequestContext, CancellationToken, ValueTask<TResponse>> handler)
+        Func<TRequest, IpcRequestContext, CancellationToken, Task<TResponse>> handler)
         where TRequest : IIpcRequest<TResponse> =>
         RegisterHandler(new DelegateRequestHandler<TRequest, TResponse>(handler));
 
@@ -119,7 +118,7 @@ public sealed class IpcServer : IAsyncDisposable
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
-        await _lifecycleGate.WaitAsync(cancellationToken);
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             if (_runTask is not null)
@@ -128,7 +127,7 @@ public sealed class IpcServer : IAsyncDisposable
             }
 
             _lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            _runTask = RunAsync(_lifetime.Token);
+            _runTask = Task.Run(() => RunAsync(_lifetime.Token));
         }
         finally
         {
@@ -139,7 +138,7 @@ public sealed class IpcServer : IAsyncDisposable
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         Task? runTask;
-        await _lifecycleGate.WaitAsync(cancellationToken);
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             if (_lifetime is null || _runTask is null)
@@ -147,7 +146,7 @@ public sealed class IpcServer : IAsyncDisposable
                 return;
             }
 
-            await AsyncCompatibility.CancelAsync(_lifetime);
+            await AsyncCompatibility.CancelAsync(_lifetime).ConfigureAwait(false);
             runTask = _runTask;
         }
         finally
@@ -157,34 +156,43 @@ public sealed class IpcServer : IAsyncDisposable
 
         try
         {
-            await AsyncCompatibility.WaitWithCancellationAsync(runTask, cancellationToken);
+            await AsyncCompatibility.WaitWithCancellationAsync(runTask, cancellationToken)
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
     }
 
-    public async ValueTask<int> PublishAsync<TEvent>(
+    public async Task<int> PublishAsync<TEvent>(
         TEvent data,
         CancellationToken cancellationToken = default)
         where TEvent : IIpcEvent
     {
-        var eventData = JsonSerializer.SerializeToElement(data, IpcProtocol.JsonOptions);
+        var eventData = IpcSerializer.Serialize(data);
         var eventContract = ContractName.For<TEvent>();
         var delivered = 0;
 
         foreach (var session in _sessions.Values)
         {
-            delivered += await session.PublishAsync(eventContract, eventData, cancellationToken);
+            delivered += await session.PublishAsync(eventContract, eventData, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         return delivered;
     }
 
-    public async ValueTask DisposeAsync()
+    public async Task DisposeAsync()
     {
-        await StopAsync();
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        await StopAsync().ConfigureAwait(false);
         _lifetime?.Dispose();
         _lifecycleGate.Dispose();
     }
+
+    public void Dispose() => DisposeAsync().GetAwaiter().GetResult();
 
     private void RegisterInvoker(IRequestHandlerInvoker invoker)
     {
@@ -243,8 +251,7 @@ public sealed class IpcServer : IAsyncDisposable
         TimeSpan heartbeatInterval)
     {
         private readonly SemaphoreSlim _writeGate = new(1, 1);
-        private readonly Channel<WorkItem> _workQueue = Channel.CreateUnbounded<WorkItem>(
-            new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+        private readonly AsyncQueue<WorkItem> _workQueue = new();
         private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _operations = new();
         private readonly ConcurrentDictionary<Guid, string> _subscriptions = new();
 
@@ -263,7 +270,7 @@ public sealed class IpcServer : IAsyncDisposable
             finally
             {
                 await AsyncCompatibility.CancelAsync(lifetime);
-                _workQueue.Writer.TryComplete();
+                _workQueue.Complete();
                 foreach (var operation in _operations.Values)
                 {
                     try
@@ -290,7 +297,7 @@ public sealed class IpcServer : IAsyncDisposable
 
         public async Task<int> PublishAsync(
             string eventContract,
-            JsonElement data,
+            byte[] data,
             CancellationToken cancellationToken)
         {
             var ids = _subscriptions
@@ -320,7 +327,7 @@ public sealed class IpcServer : IAsyncDisposable
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                var envelope = await LengthPrefixedJson.ReadAsync(pipe, cancellationToken);
+                var envelope = await ProtocolFraming.ReadAsync(pipe, cancellationToken);
                 if (envelope is null)
                 {
                     return;
@@ -388,9 +395,14 @@ public sealed class IpcServer : IAsyncDisposable
                 return;
             }
 
-            await _workQueue.Writer.WriteAsync(
-                new WorkItem(requestId, request.Arguments, handler, operation),
-                cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_workQueue.TryEnqueue(
+                    new WorkItem(requestId, request.Arguments, handler, operation)))
+            {
+                _operations.TryRemove(requestId, out _);
+                operation.Dispose();
+                throw new IpcDisconnectedException("The client work queue has completed.");
+            }
             await SendAsync(
                 IpcEnvelope.Create(
                     MessageTypes.RequestAccepted,
@@ -433,8 +445,15 @@ public sealed class IpcServer : IAsyncDisposable
 
         private async Task ProcessWorkQueueAsync(CancellationToken cancellationToken)
         {
-            await foreach (var work in _workQueue.Reader.ReadAllAsync(cancellationToken))
+            while (!cancellationToken.IsCancellationRequested)
             {
+                var queued = await _workQueue.ReadAsync(cancellationToken);
+                if (!queued.HasItem)
+                {
+                    break;
+                }
+
+                var work = queued.Item;
                 try
                 {
                     var context = new IpcRequestContext((progress, token) =>
@@ -492,12 +511,12 @@ public sealed class IpcServer : IAsyncDisposable
             }
         }
 
-        private async ValueTask SendAsync(IpcEnvelope message, CancellationToken cancellationToken)
+        private async Task SendAsync(IpcEnvelope message, CancellationToken cancellationToken)
         {
             await _writeGate.WaitAsync(cancellationToken);
             try
             {
-                await LengthPrefixedJson.WriteAsync(pipe, message, cancellationToken);
+                await ProtocolFraming.WriteAsync(pipe, message, cancellationToken);
             }
             finally
             {
@@ -527,7 +546,7 @@ public sealed class IpcServer : IAsyncDisposable
 
         private sealed record WorkItem(
             Guid RequestId,
-            JsonElement Arguments,
+            byte[] Arguments,
             IRequestHandlerInvoker Handler,
             CancellationTokenSource Cancellation);
     }
@@ -600,8 +619,8 @@ public sealed class IpcServer : IAsyncDisposable
     {
         string Contract { get; }
         Type RequestType { get; }
-        ValueTask<JsonElement> InvokeAsync(
-            JsonElement request,
+        Task<byte[]> InvokeAsync(
+            byte[] request,
             IpcRequestContext context,
             CancellationToken cancellationToken);
     }
@@ -613,24 +632,23 @@ public sealed class IpcServer : IAsyncDisposable
         public string Contract { get; } = ContractName.For<TRequest>();
         public Type RequestType => typeof(TRequest);
 
-        public async ValueTask<JsonElement> InvokeAsync(
-            JsonElement request,
+        public async Task<byte[]> InvokeAsync(
+            byte[] request,
             IpcRequestContext context,
             CancellationToken cancellationToken)
         {
-            var typedRequest = request.Deserialize<TRequest>(IpcProtocol.JsonOptions)
-                ?? throw new InvalidDataException($"Request contained no {typeof(TRequest).Name} payload.");
+            var typedRequest = IpcSerializer.Deserialize<TRequest>(request);
             var response = await handler.HandleAsync(typedRequest, context, cancellationToken);
-            return JsonSerializer.SerializeToElement(response, IpcProtocol.JsonOptions);
+            return IpcSerializer.Serialize(response);
         }
     }
 
     private sealed class DelegateRequestHandler<TRequest, TResponse>(
-        Func<TRequest, IpcRequestContext, CancellationToken, ValueTask<TResponse>> handler)
+        Func<TRequest, IpcRequestContext, CancellationToken, Task<TResponse>> handler)
         : IIpcRequestHandler<TRequest, TResponse>
         where TRequest : IIpcRequest<TResponse>
     {
-        public ValueTask<TResponse> HandleAsync(
+        public Task<TResponse> HandleAsync(
             TRequest request,
             IpcRequestContext context,
             CancellationToken cancellationToken) =>

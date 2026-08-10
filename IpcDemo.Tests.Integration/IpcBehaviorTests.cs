@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.Serialization;
 using Liftoff.Ipc;
 
 namespace IpcDemo.Tests.Integration;
@@ -77,7 +78,7 @@ public sealed class IpcBehaviorTests
         await using var subscription = await client.SubscribeAsync<ItemChanged>();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         await using var events = subscription.GetAsyncEnumerator(timeout.Token);
-        var nextEvent = events.MoveNextAsync().AsTask();
+        var nextEvent = events.MoveNextAsync();
         var whileSubscribed = await app.Server.PublishAsync(eventData);
 
         Assert.True(await nextEvent);
@@ -176,7 +177,7 @@ public sealed class IpcBehaviorTests
         public void Report(T value) => _values.Enqueue(value);
     }
 
-    private sealed class TestApplication : IAsyncDisposable
+    private sealed class TestApplication
     {
         private TestApplication(IpcSession session, IpcServer server)
         {
@@ -199,28 +200,34 @@ public sealed class IpcBehaviorTests
         public Task<IpcClient> ConnectClientAsync() =>
             IpcClient.ConnectAsync(Session);
 
-        public ValueTask DisposeAsync() => Server.DisposeAsync();
+        public Task DisposeAsync() => Server.DisposeAsync();
     }
 }
 
+[DataContract]
 public sealed record Analyze(
-    string ModelName,
-    int Steps = 1,
-    int DelayMilliseconds = 1,
-    bool ShouldFail = false) : IIpcRequest<AnalysisResult>;
+    [property: DataMember(Order = 1)] string ModelName,
+    [property: DataMember(Order = 2)] int Steps = 1,
+    [property: DataMember(Order = 3)] int DelayMilliseconds = 1,
+    [property: DataMember(Order = 4)] bool ShouldFail = false) : IIpcRequest<AnalysisResult>;
 
+[DataContract]
 public sealed record AnalysisResult(
-    string ModelName,
-    int ElementsAnalyzed,
-    TimeSpan Elapsed);
+    [property: DataMember(Order = 1)] string ModelName,
+    [property: DataMember(Order = 2)] int ElementsAnalyzed,
+    [property: DataMember(Order = 3)] TimeSpan Elapsed);
 
-public sealed record ItemChanged(int ElementId, string ElementName) : IIpcEvent;
+[DataContract]
+public sealed record ItemChanged(
+    [property: DataMember(Order = 1)] int ElementId,
+    [property: DataMember(Order = 2)] string ElementName) : IIpcEvent;
 
+[DataContract]
 public sealed record UnknownRequest : IIpcRequest<IpcUnit>;
 
 public sealed class AnalyzeHandler : IIpcRequestHandler<Analyze, AnalysisResult>
 {
-    public async ValueTask<AnalysisResult> HandleAsync(
+    public async Task<AnalysisResult> HandleAsync(
         Analyze request,
         IpcRequestContext context,
         CancellationToken cancellationToken)

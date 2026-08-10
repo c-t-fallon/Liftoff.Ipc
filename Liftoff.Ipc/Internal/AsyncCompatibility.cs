@@ -19,19 +19,19 @@ internal static class AsyncCompatibility
 #if NETFRAMEWORK
         if (!cancellationToken.CanBeCanceled)
         {
-            await task;
+            await task.ConfigureAwait(false);
             return;
         }
 
         var cancellation = Task.Delay(Timeout.Infinite, cancellationToken);
-        if (await Task.WhenAny(task, cancellation) != task)
+        if (await Task.WhenAny(task, cancellation).ConfigureAwait(false) != task)
         {
             throw new OperationCanceledException(cancellationToken);
         }
 
-        await task;
+        await task.ConfigureAwait(false);
 #else
-        await task.WaitAsync(cancellationToken);
+        await task.WaitAsync(cancellationToken).ConfigureAwait(false);
 #endif
     }
 
@@ -42,18 +42,18 @@ internal static class AsyncCompatibility
 #if NETFRAMEWORK
         if (!cancellationToken.CanBeCanceled)
         {
-            return await task;
+            return await task.ConfigureAwait(false);
         }
 
         var cancellation = Task.Delay(Timeout.Infinite, cancellationToken);
-        if (await Task.WhenAny(task, cancellation) != task)
+        if (await Task.WhenAny(task, cancellation).ConfigureAwait(false) != task)
         {
             throw new OperationCanceledException(cancellationToken);
         }
 
-        return await task;
+        return await task.ConfigureAwait(false);
 #else
-        return await task.WaitAsync(cancellationToken);
+        return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
 #endif
     }
 
@@ -64,15 +64,15 @@ internal static class AsyncCompatibility
     {
 #if NETFRAMEWORK
         var timeoutTask = Task.Delay(timeout, cancellationToken);
-        if (await Task.WhenAny(task, timeoutTask) != task)
+        if (await Task.WhenAny(task, timeoutTask).ConfigureAwait(false) != task)
         {
             cancellationToken.ThrowIfCancellationRequested();
             throw new TimeoutException($"The operation did not complete within {timeout}.");
         }
 
-        return await task;
+        return await task.ConfigureAwait(false);
 #else
-        return await task.WaitAsync(timeout, cancellationToken);
+        return await task.WaitAsync(timeout, cancellationToken).ConfigureAwait(false);
 #endif
     }
 }

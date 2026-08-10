@@ -1,6 +1,5 @@
 using Liftoff.Ipc.Internal;
 using System.Collections.Concurrent;
-using System.Text.Json;
 
 namespace Liftoff.Ipc;
 
@@ -12,6 +11,7 @@ public sealed class IpcClient : IIpcClient
     private readonly ConcurrentDictionary<Guid, ISubscriptionState> _subscriptions = new();
     private readonly CancellationTokenSource _lifetime = new();
     private readonly Task _readerTask;
+    private int _disposed;
 
     private IpcClient(IIpcTransport transport, TimeSpan acknowledgementTimeout)
     {
@@ -25,7 +25,7 @@ public sealed class IpcClient : IIpcClient
         IpcClientOptions options,
         CancellationToken cancellationToken)
     {
-        await transport.ConnectAsync(cancellationToken);
+        await transport.ConnectAsync(cancellationToken).ConfigureAwait(false);
         return new IpcClient(transport, options.AcknowledgementTimeout);
     }
 
@@ -85,28 +85,27 @@ public sealed class IpcClient : IIpcClient
             throw new InvalidOperationException($"Duplicate request ID {requestId}.");
         }
 
-        var arguments = JsonSerializer.SerializeToElement(request, request.GetType(), IpcProtocol.JsonOptions);
+        var arguments = IpcSerializer.Serialize(request, request.GetType());
         var execute = new ExecuteRequest(ContractName.For(request.GetType()), arguments);
 
         try
         {
             await _transport.SendAsync(
                 IpcEnvelope.Create(MessageTypes.ExecuteRequest, requestId, execute),
-                cancellationToken);
+                cancellationToken).ConfigureAwait(false);
             await AsyncCompatibility.WaitWithTimeoutAsync(
                 pending.Accepted.Task,
                 _acknowledgementTimeout,
-                cancellationToken);
+                cancellationToken).ConfigureAwait(false);
 
             var result = await AsyncCompatibility.WaitWithCancellationAsync(
                 pending.Completion.Task,
-                cancellationToken);
-            return result.Deserialize<TResponse>(IpcProtocol.JsonOptions)
-                ?? throw new InvalidDataException($"The server returned no {typeof(TResponse).Name} result.");
+                cancellationToken).ConfigureAwait(false);
+            return IpcSerializer.Deserialize<TResponse>(result);
         }
         catch (OperationCanceledException)
         {
-            await TrySendCancellationAsync(requestId);
+            await TrySendCancellationAsync(requestId).ConfigureAwait(false);
             throw;
         }
         finally
@@ -134,23 +133,28 @@ public sealed class IpcClient : IIpcClient
                     MessageTypes.SubscribeRequest,
                     subscriptionId,
                     new SubscribeRequest(ContractName.For<TEvent>())),
-                cancellationToken);
+                cancellationToken).ConfigureAwait(false);
             await AsyncCompatibility.WaitWithTimeoutAsync(
                 state.Accepted.Task,
                 _acknowledgementTimeout,
-                cancellationToken);
+                cancellationToken).ConfigureAwait(false);
             return subscription;
         }
         catch
         {
-            await subscription.DisposeAsync();
+            await subscription.DisposeAsync().ConfigureAwait(false);
             throw;
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public async Task DisposeAsync()
     {
-        await AsyncCompatibility.CancelAsync(_lifetime);
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        await AsyncCompatibility.CancelAsync(_lifetime).ConfigureAwait(false);
 
         var disposed = new IpcDisconnectedException("The IPC client was disposed.");
         foreach (var pending in _pending.Values)
@@ -164,11 +168,11 @@ public sealed class IpcClient : IIpcClient
         }
 
         _subscriptions.Clear();
-        await _transport.DisposeAsync();
+        await _transport.DisposeAsync().ConfigureAwait(false);
 
         try
         {
-            await _readerTask;
+            await _readerTask.ConfigureAwait(false);
         }
         catch (OperationCanceledException) { }
         catch (IOException) { }
@@ -176,13 +180,21 @@ public sealed class IpcClient : IIpcClient
         _lifetime.Dispose();
     }
 
+    public void Dispose() => DisposeAsync().GetAwaiter().GetResult();
+
     private async Task ReadLoopAsync(CancellationToken cancellationToken)
     {
         Exception? disconnectError = null;
         try
         {
-            await foreach (var message in _transport.ReadAllAsync(cancellationToken))
+            while (!cancellationToken.IsCancellationRequested)
             {
+                var message = await _transport.ReadAsync(cancellationToken).ConfigureAwait(false);
+                if (message is null)
+                {
+                    break;
+                }
+
                 Dispatch(message);
             }
 
@@ -285,8 +297,8 @@ public sealed class IpcClient : IIpcClient
         try
         {
             await _transport.SendAsync(
-                IpcEnvelope.Create(MessageTypes.CancelRequest, requestId, new { }),
-                CancellationToken.None);
+                IpcEnvelope.CreateEmpty(MessageTypes.CancelRequest, requestId),
+                CancellationToken.None).ConfigureAwait(false);
         }
         catch { }
     }
@@ -318,7 +330,7 @@ public sealed class IpcClient : IIpcClient
         }
     }
 
-    private async ValueTask RemoveSubscriptionAsync(Guid subscriptionId)
+    private async Task RemoveSubscriptionAsync(Guid subscriptionId)
     {
         if (!_subscriptions.TryGetValue(subscriptionId, out var subscription))
         {
@@ -328,12 +340,12 @@ public sealed class IpcClient : IIpcClient
         try
         {
             await _transport.SendAsync(
-                IpcEnvelope.Create(MessageTypes.UnsubscribeRequest, subscriptionId, new { }),
-                CancellationToken.None);
+                IpcEnvelope.CreateEmpty(MessageTypes.UnsubscribeRequest, subscriptionId),
+                CancellationToken.None).ConfigureAwait(false);
             await AsyncCompatibility.WaitWithTimeoutAsync(
                 subscription.Unsubscribed.Task,
                 _acknowledgementTimeout,
-                CancellationToken.None);
+                CancellationToken.None).ConfigureAwait(false);
         }
         catch { }
         finally
@@ -347,7 +359,7 @@ public sealed class IpcClient : IIpcClient
     {
         public TaskCompletionSource<bool> Accepted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public TaskCompletionSource<JsonElement> Completion { get; } =
+        public TaskCompletionSource<byte[]> Completion { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public IProgress<IpcProgress>? Progress { get; } = progress;
 

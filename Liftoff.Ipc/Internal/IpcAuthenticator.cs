@@ -34,7 +34,7 @@ internal static class IpcAuthenticator
         CancellationToken cancellationToken)
     {
         var clientNonce = CreateRandomBytes(NonceBytes);
-        await LengthPrefixedJson.WriteAsync(
+        await ProtocolFraming.WriteAsync(
             stream,
             IpcEnvelope.Create(
                 MessageTypes.AuthenticationHello,
@@ -42,7 +42,7 @@ internal static class IpcAuthenticator
                 new AuthenticationHello(clientNonce)),
             cancellationToken);
 
-        var challengeEnvelope = await LengthPrefixedJson.ReadAsync(stream, cancellationToken);
+        var challengeEnvelope = await ProtocolFraming.ReadAsync(stream, cancellationToken);
         if (challengeEnvelope?.Type != MessageTypes.AuthenticationChallenge)
         {
             throw new IpcAuthenticationException("The IPC server did not provide an authentication challenge.");
@@ -66,7 +66,7 @@ internal static class IpcAuthenticator
             "client",
             clientNonce,
             challenge.ServerNonce);
-        await LengthPrefixedJson.WriteAsync(
+        await ProtocolFraming.WriteAsync(
             stream,
             IpcEnvelope.Create(
                 MessageTypes.AuthenticationProof,
@@ -74,7 +74,7 @@ internal static class IpcAuthenticator
                 new AuthenticationProof(clientProof)),
             cancellationToken);
 
-        var accepted = await LengthPrefixedJson.ReadAsync(stream, cancellationToken);
+        var accepted = await ProtocolFraming.ReadAsync(stream, cancellationToken);
         if (accepted?.Type != MessageTypes.AuthenticationAccepted)
         {
             throw new IpcAuthenticationException("The IPC server rejected the session.");
@@ -86,7 +86,7 @@ internal static class IpcAuthenticator
         byte[] authenticationKey,
         CancellationToken cancellationToken)
     {
-        var helloEnvelope = await LengthPrefixedJson.ReadAsync(stream, cancellationToken);
+        var helloEnvelope = await ProtocolFraming.ReadAsync(stream, cancellationToken);
         if (helloEnvelope?.Type != MessageTypes.AuthenticationHello)
         {
             throw new IpcAuthenticationException("The IPC client did not begin authentication.");
@@ -100,7 +100,7 @@ internal static class IpcAuthenticator
             "server",
             hello.ClientNonce,
             serverNonce);
-        await LengthPrefixedJson.WriteAsync(
+        await ProtocolFraming.WriteAsync(
             stream,
             IpcEnvelope.Create(
                 MessageTypes.AuthenticationChallenge,
@@ -108,7 +108,7 @@ internal static class IpcAuthenticator
                 new AuthenticationChallenge(serverNonce, serverProof)),
             cancellationToken);
 
-        var proofEnvelope = await LengthPrefixedJson.ReadAsync(stream, cancellationToken);
+        var proofEnvelope = await ProtocolFraming.ReadAsync(stream, cancellationToken);
         if (proofEnvelope?.Type != MessageTypes.AuthenticationProof)
         {
             throw new IpcAuthenticationException("The IPC client did not complete authentication.");
@@ -126,7 +126,7 @@ internal static class IpcAuthenticator
             throw new IpcAuthenticationException("The IPC client could not authenticate the session.");
         }
 
-        await LengthPrefixedJson.WriteAsync(
+        await ProtocolFraming.WriteAsync(
             stream,
             IpcEnvelope.Create(
                 MessageTypes.AuthenticationAccepted,
@@ -163,7 +163,8 @@ internal static class IpcAuthenticator
         catch (Exception exception) when (
             exception is IOException
             || exception is InvalidDataException
-            || exception is System.Text.Json.JsonException)
+            || exception is System.Runtime.Serialization.SerializationException
+            || exception is System.Xml.XmlException)
         {
             throw new IpcAuthenticationException("IPC authentication failed.", exception);
         }

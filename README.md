@@ -2,7 +2,9 @@
 
 `Liftoff.Ipc` is a small library for typed request/response and server-published events between local .NET processes over Windows named pipes. The demo models a parent application hosting the server and a distributed child executable connecting as its client.
 
-The NuGet package targets .NET Framework 4.8, .NET 8, and .NET 10. Endpoints may use different target frameworks: for example, a Revit 2024 add-in on .NET Framework 4.8 can communicate with a child process on .NET 8 while both reference the corresponding build of the same contracts package.
+The dependency-free NuGet package targets .NET Framework 4.8, .NET 8, and .NET 10. Endpoints may use different target frameworks: for example, a Revit 2024 add-in on .NET Framework 4.8 can communicate with a child process on .NET 8 while both reference the corresponding build of the same contracts package.
+
+Release maintainers should follow the [release runbook](docs/RELEASING.md). Packaging and publishing are intentionally owned by GitHub Actions rather than the library project.
 
 The library keeps correlation IDs, acknowledgement timeouts, framing, serialization, heartbeats, cancellation, subscriptions, and pipe lifecycle behind one public namespace:
 
@@ -37,14 +39,24 @@ Fixed-name overloads remain available for independently configured applications.
 Parent and child reference the same small contract assembly. Requests declare their response type, while events use a marker interface:
 
 ```csharp
-public sealed record AnalyzeModel(string ModelName)
+using System.Runtime.Serialization;
+
+[DataContract]
+public sealed record AnalyzeModel(
+    [property: DataMember(Order = 1)] string ModelName)
     : IIpcRequest<AnalysisResult>;
 
-public sealed record AnalysisResult(int ElementsAnalyzed);
+[DataContract]
+public sealed record AnalysisResult(
+    [property: DataMember(Order = 1)] int ElementsAnalyzed);
 
-public sealed record ModelChanged(int ElementId)
+[DataContract]
+public sealed record ModelChanged(
+    [property: DataMember(Order = 1)] int ElementId)
     : IIpcEvent;
 ```
+
+Explicit data contracts keep the binary wire representation stable between .NET Framework and modern .NET without bringing serializer packages into a Revit process.
 
 No manual message names or contract versions are required. The library derives an internal identity from the shared CLR type's assembly name and full name. This fits applications where the parent, child, contracts, and IPC library are distributed as one aligned unit.
 
@@ -56,7 +68,7 @@ Handlers follow a mediator-style interface and may report progress:
 public sealed class AnalyzeModelHandler
     : IIpcRequestHandler<AnalyzeModel, AnalysisResult>
 {
-    public async ValueTask<AnalysisResult> HandleAsync(
+    public async Task<AnalysisResult> HandleAsync(
         AnalyzeModel request,
         IpcRequestContext context,
         CancellationToken cancellationToken)

@@ -1,13 +1,12 @@
 using System.IO.Pipes;
-using System.Runtime.CompilerServices;
-
 namespace Liftoff.Ipc.Internal;
 
-internal interface IIpcTransport : IAsyncDisposable
+internal interface IIpcTransport : IDisposable
 {
     Task ConnectAsync(CancellationToken cancellationToken = default);
-    ValueTask SendAsync(IpcEnvelope message, CancellationToken cancellationToken = default);
-    IAsyncEnumerable<IpcEnvelope> ReadAllAsync(CancellationToken cancellationToken = default);
+    Task SendAsync(IpcEnvelope message, CancellationToken cancellationToken = default);
+    Task<IpcEnvelope?> ReadAsync(CancellationToken cancellationToken = default);
+    Task DisposeAsync();
 }
 
 internal sealed class NamedPipeTransport(
@@ -41,14 +40,14 @@ internal sealed class NamedPipeTransport(
 
         try
         {
-            await pipe.ConnectAsync(cancellationToken);
+            await pipe.ConnectAsync(cancellationToken).ConfigureAwait(false);
             if (authenticationKey is not null)
             {
                 await IpcAuthenticator.AuthenticateClientAsync(
                     pipe,
                     authenticationKey,
                     options.AuthenticationTimeout,
-                    cancellationToken);
+                    cancellationToken).ConfigureAwait(false);
             }
 
             _pipe = pipe;
@@ -60,13 +59,13 @@ internal sealed class NamedPipeTransport(
         }
     }
 
-    public async ValueTask SendAsync(IpcEnvelope message, CancellationToken cancellationToken = default)
+    public async Task SendAsync(IpcEnvelope message, CancellationToken cancellationToken = default)
     {
         var pipe = GetConnectedPipe();
-        await _writeGate.WaitAsync(cancellationToken);
+        await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await LengthPrefixedJson.WriteAsync(pipe, message, cancellationToken);
+            await ProtocolFraming.WriteAsync(pipe, message, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -74,27 +73,19 @@ internal sealed class NamedPipeTransport(
         }
     }
 
-    public async IAsyncEnumerable<IpcEnvelope> ReadAllAsync(
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        var pipe = GetConnectedPipe();
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            var message = await LengthPrefixedJson.ReadAsync(pipe, cancellationToken);
-            if (message is null)
-            {
-                yield break;
-            }
+    public Task<IpcEnvelope?> ReadAsync(CancellationToken cancellationToken = default) =>
+        ProtocolFraming.ReadAsync(GetConnectedPipe(), cancellationToken);
 
-            yield return message;
-        }
+    public Task DisposeAsync()
+    {
+        Dispose();
+        return Task.CompletedTask;
     }
 
-    public ValueTask DisposeAsync()
+    public void Dispose()
     {
         _pipe?.Dispose();
         _writeGate.Dispose();
-        return default;
     }
 
     private NamedPipeClientStream GetConnectedPipe() =>

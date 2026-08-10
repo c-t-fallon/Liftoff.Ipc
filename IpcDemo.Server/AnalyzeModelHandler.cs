@@ -7,7 +7,7 @@ namespace IpcDemo.Server;
 public sealed class AnalyzeModelHandler
     : IIpcRequestHandler<AnalyzeModelRequest, AnalyzeModelResult>
 {
-    public async ValueTask<AnalyzeModelResult> HandleAsync(
+    public async Task<AnalyzeModelResult> HandleAsync(
         AnalyzeModelRequest request,
         IpcRequestContext context,
         CancellationToken cancellationToken)

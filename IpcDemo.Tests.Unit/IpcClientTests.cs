@@ -1,6 +1,4 @@
-using System.Runtime.CompilerServices;
-using System.Text.Json;
-using System.Threading.Channels;
+using System.Runtime.Serialization;
 using Liftoff.Ipc;
 using Liftoff.Ipc.Internal;
 
@@ -115,12 +113,12 @@ public sealed class IpcClientTests
         await using var subscription = await subscribeTask;
         await using var events = subscription.GetAsyncEnumerator();
 
-        var nextEvent = events.MoveNextAsync().AsTask();
+        var nextEvent = events.MoveNextAsync();
         var expected = new ModelChanged(42, "Wall-17");
         transport.Deliver(IpcEnvelope.Create(
             MessageTypes.EventPublished,
             request.RequestId,
-            new EventPublished(JsonSerializer.SerializeToElement(expected, IpcProtocol.JsonOptions))));
+            new EventPublished(IpcSerializer.Serialize(expected))));
 
         Assert.True(await nextEvent);
         Assert.Equal(expected, events.Current);
@@ -152,51 +150,61 @@ public sealed class IpcClientTests
         return IpcEnvelope.Create(
             MessageTypes.OperationCompleted,
             request.RequestId,
-            new OperationCompleted(JsonSerializer.SerializeToElement(result, IpcProtocol.JsonOptions)));
+            new OperationCompleted(IpcSerializer.Serialize(result)));
     }
 
-    private sealed record Analyze(string ModelName) : IIpcRequest<AnalysisResult>;
-    private sealed record AnalysisResult(string ModelName, int ElementsAnalyzed);
-    private sealed record ModelChanged(int ElementId, string ElementName) : IIpcEvent;
+    [DataContract]
+    public sealed record Analyze(
+        [property: DataMember(Order = 1)] string ModelName) : IIpcRequest<AnalysisResult>;
+    [DataContract]
+    public sealed record AnalysisResult(
+        [property: DataMember(Order = 1)] string ModelName,
+        [property: DataMember(Order = 2)] int ElementsAnalyzed);
+    [DataContract]
+    public sealed record ModelChanged(
+        [property: DataMember(Order = 1)] int ElementId,
+        [property: DataMember(Order = 2)] string ElementName) : IIpcEvent;
 
     private sealed class ControllableTransport : IIpcTransport
     {
-        private readonly Channel<IpcEnvelope> _sent = Channel.CreateUnbounded<IpcEnvelope>();
-        private readonly Channel<IpcEnvelope> _received = Channel.CreateUnbounded<IpcEnvelope>();
+        private readonly AsyncQueue<IpcEnvelope> _sent = new();
+        private readonly AsyncQueue<IpcEnvelope> _received = new();
 
         public Task ConnectAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
 
-        public async ValueTask SendAsync(IpcEnvelope message, CancellationToken cancellationToken = default)
+        public Task SendAsync(IpcEnvelope message, CancellationToken cancellationToken = default)
         {
-            await _sent.Writer.WriteAsync(message, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            Assert.True(_sent.TryEnqueue(message));
             if (message.Type == MessageTypes.UnsubscribeRequest)
             {
-                await _received.Writer.WriteAsync(
+                Assert.True(_received.TryEnqueue(
                     IpcEnvelope.Create(
                         MessageTypes.UnsubscriptionAccepted,
                         message.RequestId,
-                        new UnsubscriptionAccepted(DateTimeOffset.UtcNow)),
-                    cancellationToken);
+                        new UnsubscriptionAccepted(DateTimeOffset.UtcNow))));
             }
+
+            return Task.CompletedTask;
         }
 
-        public async IAsyncEnumerable<IpcEnvelope> ReadAllAsync(
-            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        public async Task<IpcEnvelope?> ReadAsync(CancellationToken cancellationToken = default) =>
+            (await _received.ReadAsync(cancellationToken)).Item;
+
+        public async Task<IpcEnvelope> NextSentMessageAsync() =>
+            (await _sent.ReadAsync()).Item;
+        public void Deliver(IpcEnvelope message) => Assert.True(_received.TryEnqueue(message));
+
+        public Task DisposeAsync()
         {
-            await foreach (var message in _received.Reader.ReadAllAsync(cancellationToken))
-            {
-                yield return message;
-            }
+            Dispose();
+            return Task.CompletedTask;
         }
 
-        public ValueTask<IpcEnvelope> NextSentMessageAsync() => _sent.Reader.ReadAsync();
-        public void Deliver(IpcEnvelope message) => Assert.True(_received.Writer.TryWrite(message));
-
-        public ValueTask DisposeAsync()
+        public void Dispose()
         {
-            _sent.Writer.TryComplete();
-            _received.Writer.TryComplete();
-            return ValueTask.CompletedTask;
+            _sent.Complete();
+            _received.Complete();
         }
     }
 }

@@ -3,7 +3,7 @@ using Liftoff.Ipc.Internal;
 
 namespace IpcDemo.Tests.Unit;
 
-public sealed class LengthPrefixedJsonTests
+public sealed class ProtocolFramingTests
 {
     [Fact]
     public async Task Written_message_can_be_read_back()
@@ -15,9 +15,9 @@ public sealed class LengthPrefixedJsonTests
             new OperationProgress(50, "Halfway there."));
         await using var stream = new MemoryStream();
 
-        await LengthPrefixedJson.WriteAsync(stream, expected);
+        await ProtocolFraming.WriteAsync(stream, expected);
         stream.Position = 0;
-        var actual = await LengthPrefixedJson.ReadAsync(stream);
+        var actual = await ProtocolFraming.ReadAsync(stream);
 
         Assert.NotNull(actual);
         Assert.Equal(expected.Type, actual.Type);
@@ -30,7 +30,7 @@ public sealed class LengthPrefixedJsonTests
     {
         await using var stream = new MemoryStream();
 
-        var message = await LengthPrefixedJson.ReadAsync(stream);
+        var message = await ProtocolFraming.ReadAsync(stream);
 
         Assert.Null(message);
     }
@@ -43,7 +43,7 @@ public sealed class LengthPrefixedJsonTests
         await using var stream = new MemoryStream(header);
 
         var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
-            await LengthPrefixedJson.ReadAsync(stream));
+            await ProtocolFraming.ReadAsync(stream));
 
         Assert.Contains("Invalid frame length", exception.Message);
     }

@@ -48,7 +48,59 @@ jobs:
         run: dotnet test IpcDemo.Tests.Unit/IpcDemo.Tests.Unit.csproj --configuration Release --no-restore
 
       - name: Run integration tests
-        run: dotnet test IpcDemo.Tests.Integration/IpcDemo.Tests.Integration.csproj --framework net10.0 --configuration Release --no-restore
+        shell: pwsh
+        run: |
+          dotnet test IpcDemo.Tests.Integration/IpcDemo.Tests.Integration.csproj --framework net48 --configuration Release --no-restore
+          dotnet test IpcDemo.Tests.Integration/IpcDemo.Tests.Integration.csproj --framework net8.0 --configuration Release --no-restore
+          dotnet test IpcDemo.Tests.Integration/IpcDemo.Tests.Integration.csproj --framework net10.0 --configuration Release --no-restore
+
+      - name: Verify mixed-runtime communication
+        shell: pwsh
+        run: |
+          dotnet build IpcDemo.slnx --configuration Release --no-restore
+          $net48Server = Resolve-Path 'IpcDemo.Server/bin/Release/net48/IpcDemo.Server.exe'
+          $net48Client = Resolve-Path 'IpcDemo.Client/bin/Release/net48/IpcDemo.Client.exe'
+          $net10Server = Resolve-Path 'IpcDemo.Server/bin/Release/net10.0/IpcDemo.Server.dll'
+          $net10Client = Resolve-Path 'IpcDemo.Client/bin/Release/net10.0/IpcDemo.Client.dll'
+          $serverOut = Join-Path $env:RUNNER_TEMP 'liftoff-ipc-server.out'
+          $serverErr = Join-Path $env:RUNNER_TEMP 'liftoff-ipc-server.err'
+
+          $server = Start-Process -FilePath $net48Server `
+            -RedirectStandardOutput $serverOut `
+            -RedirectStandardError $serverErr `
+            -PassThru `
+            -WindowStyle Hidden
+          try {
+            Start-Sleep -Milliseconds 750
+            & dotnet $net10Client
+            if ($LASTEXITCODE -ne 0) {
+              throw "The net10 client could not communicate with the net48 server."
+            }
+          }
+          finally {
+            if (!$server.HasExited) {
+              Stop-Process -Id $server.Id -Force
+            }
+          }
+
+          $server = Start-Process -FilePath 'dotnet' `
+            -ArgumentList @($net10Server) `
+            -RedirectStandardOutput $serverOut `
+            -RedirectStandardError $serverErr `
+            -PassThru `
+            -WindowStyle Hidden
+          try {
+            Start-Sleep -Milliseconds 750
+            & $net48Client
+            if ($LASTEXITCODE -ne 0) {
+              throw "The net48 client could not communicate with the net10 server."
+            }
+          }
+          finally {
+            if (!$server.HasExited) {
+              Stop-Process -Id $server.Id -Force
+            }
+          }
 
       - name: Add package-only build settings
         shell: pwsh

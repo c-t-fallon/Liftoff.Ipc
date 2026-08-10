@@ -1,3 +1,5 @@
+using System.Runtime.Serialization;
+
 namespace Liftoff.Ipc;
 
 public interface IIpcRequest<TResponse>;
@@ -7,13 +9,13 @@ public interface IIpcEvent;
 public interface IIpcRequestHandler<in TRequest, TResponse>
     where TRequest : IIpcRequest<TResponse>
 {
-    ValueTask<TResponse> HandleAsync(
+    Task<TResponse> HandleAsync(
         TRequest request,
         IpcRequestContext context,
         CancellationToken cancellationToken);
 }
 
-public interface IIpcClient : IAsyncDisposable
+public interface IIpcClient : IDisposable
 {
     Task<TResponse> RequestAsync<TResponse>(
         IIpcRequest<TResponse> request,
@@ -23,24 +25,27 @@ public interface IIpcClient : IAsyncDisposable
     Task<IpcSubscription<TEvent>> SubscribeAsync<TEvent>(
         CancellationToken cancellationToken = default)
         where TEvent : IIpcEvent;
+
+    Task DisposeAsync();
 }
 
 public sealed record IpcProgress(double Percent, string Message);
 
+[DataContract]
 public readonly record struct IpcUnit;
 
 public interface IIpcCommand : IIpcRequest<IpcUnit>;
 
 public sealed class IpcRequestContext
 {
-    private readonly Func<IpcProgress, CancellationToken, ValueTask> _reportProgress;
+    private readonly Func<IpcProgress, CancellationToken, Task> _reportProgress;
 
-    internal IpcRequestContext(Func<IpcProgress, CancellationToken, ValueTask> reportProgress)
+    internal IpcRequestContext(Func<IpcProgress, CancellationToken, Task> reportProgress)
     {
         _reportProgress = reportProgress;
     }
 
-    public ValueTask ReportProgressAsync(
+    public Task ReportProgressAsync(
         double percent,
         string message,
         CancellationToken cancellationToken = default) =>
