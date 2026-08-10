@@ -1,0 +1,113 @@
+name: Publish NuGet package
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build, verify, and publish
+    runs-on: ubuntu-latest
+    environment: nuget.org
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out the released source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Install .NET SDKs
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Derive and validate the package version
+        id: version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          if ($version -cnotmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
+            throw "Release tag '$env:RELEASE_TAG' must be a SemVer version such as v1.2.3 or v1.2.3-beta.1."
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Restore
+        run: dotnet restore IpcDemo.slnx
+
+      - name: Run unit tests
+        run: dotnet test IpcDemo.Tests.Unit/IpcDemo.Tests.Unit.csproj --configuration Release --no-restore
+
+      - name: Run integration tests
+        run: dotnet test IpcDemo.Tests.Integration/IpcDemo.Tests.Integration.csproj --framework net10.0 --configuration Release --no-restore
+
+      - name: Add package-only build settings
+        shell: pwsh
+        run: |
+          @'
+          <Project>
+            <PropertyGroup>
+              <PackageId>Liftoff.Ipc</PackageId>
+              <Authors>Liftoff</Authors>
+              <Description>Typed request-response and subscribed events between local .NET processes over Windows named pipes.</Description>
+              <PackageTags>ipc;named-pipes;rpc;events;inter-process-communication</PackageTags>
+              <PackageReadmeFile>README.md</PackageReadmeFile>
+              <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
+              <PackageProjectUrl>${{ github.server_url }}/${{ github.repository }}</PackageProjectUrl>
+              <RepositoryUrl>${{ github.server_url }}/${{ github.repository }}</RepositoryUrl>
+              <RepositoryType>git</RepositoryType>
+              <PublishRepositoryUrl>true</PublishRepositoryUrl>
+              <IncludeSymbols>true</IncludeSymbols>
+              <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+              <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+              <EnablePackageValidation>true</EnablePackageValidation>
+            </PropertyGroup>
+            <ItemGroup>
+              <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" />
+              <None Include="$(MSBuildThisFileDirectory)LICENSE.txt" Pack="true" PackagePath="\" />
+            </ItemGroup>
+          </Project>
+          '@ | Set-Content Directory.Build.targets
+
+      - name: Pack
+        shell: pwsh
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          dotnet pack Liftoff.Ipc/Liftoff.Ipc.csproj `
+            --configuration Release `
+            --no-restore `
+            --output artifacts `
+            -p:Version=$env:PACKAGE_VERSION
+
+      - name: Upload packages for inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: Liftoff.Ipc-${{ steps.version.outputs.version }}
+          path: artifacts/*.*nupkg
+          if-no-files-found: error
+
+      - name: Sign in to NuGet.org
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ vars.NUGET_USER }}
+
+      - name: Publish to NuGet.org
+        shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        run: >-
+          dotnet nuget push "artifacts/*.nupkg"
+          --api-key $env:NUGET_API_KEY
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate

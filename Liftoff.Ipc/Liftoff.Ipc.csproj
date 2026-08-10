@@ -5,15 +5,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
-    <PackageId>Liftoff.Ipc</PackageId>
-    <Version>0.1.0</Version>
-    <Authors>Liftoff</Authors>
-    <Description>Typed request-response and subscribed events between local .NET processes over Windows named pipes.</Description>
-    <PackageTags>ipc;named-pipes;rpc;events;inter-process-communication</PackageTags>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
-    <IncludeSymbols>true</IncludeSymbols>
-    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
-    <EnablePackageValidation>true</EnablePackageValidation>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
@@ -22,9 +13,4 @@
     <PackageReference Include="System.Text.Json" Version="10.0.0" />
     <PackageReference Include="System.Threading.Channels" Version="10.0.0" />
   </ItemGroup>
-
-  <ItemGroup>
-    <None Include="..\README.md" Pack="true" PackagePath="\" />
-  </ItemGroup>
-
 </Project>
