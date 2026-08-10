@@ -106,8 +106,10 @@ jobs:
         shell: pwsh
         env:
           NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
-        run: >-
-          dotnet nuget push "artifacts/*.nupkg"
-          --api-key $env:NUGET_API_KEY
-          --source https://api.nuget.org/v3/index.json
-          --skip-duplicate
+        run: |
+          Get-ChildItem artifacts -Filter *.nupkg | ForEach-Object {
+            dotnet nuget push $_.FullName `
+              --api-key $env:NUGET_API_KEY `
+              --source https://api.nuget.org/v3/index.json `
+              --skip-duplicate
+          }
