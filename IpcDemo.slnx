@@ -4,5 +4,7 @@
   <Project Path="IpcDemo.Server/IpcDemo.Server.csproj" />
   <Project Path="IpcDemo.Tests.Integration/IpcDemo.Tests.Integration.csproj" />
   <Project Path="IpcDemo.Tests.Unit/IpcDemo.Tests.Unit.csproj" />
+  <Project Path="IpcDemo.Wpf.Client/IpcDemo.Wpf.Client.csproj" Id="a1e02d25-19de-45de-ace6-148132f0dee3" />
+  <Project Path="IpcDemo.Wpf.Server/IpcDemo.Wpf.Server.csproj" Id="acd9792b-35f8-41fc-a8de-04f0b3c7414c" />
   <Project Path="Liftoff.Ipc/Liftoff.Ipc.csproj" />
 </Solution>

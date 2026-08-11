@@ -138,6 +138,7 @@ var recipients = await server.PublishAsync(
 - `IpcDemo.Contracts` is an example application contract assembly shared by the demo parent and child.
 - `IpcDemo.Server` contains application handlers and server startup only.
 - `IpcDemo.Client` contains client application code only.
+- `IpcDemo.Wpf.Server` and `IpcDemo.Wpf.Client` are visual learning tools built with native WPF controls and CommunityToolkit.Mvvm. Their shared presentation models live in `IpcDemo.Wpf.Shared`.
 
 The server's pipe reader never runs application handlers. It acknowledges and queues requests so transport processing remains responsive. A single queue consumer invokes handlers; a Revit application can make its handler delegate into `ExternalEvent` without introducing a Revit dependency into this library.
 
@@ -162,6 +163,16 @@ dotnet run --project IpcDemo.Client --framework net10.0 -- --fail
 dotnet run --project IpcDemo.Client --framework net10.0 -- --cancel-after=1200
 dotnet run --project IpcDemo.Client --framework net10.0 -- --events
 ```
+
+For the visual demo, run the server station and click **Start + launch client**. The server creates an authenticated IPC session, launches the client as a tracked child process, and the client connects automatically. Stopping or closing the server also closes the launched client.
+
+```powershell
+dotnet run --project IpcDemo.Wpf.Server
+```
+
+The original manual workflow remains available: click **Start listening**, run `dotnet run --project IpcDemo.Wpf.Client` in another terminal, and click **Connect**.
+
+The client exposes progress, cancellation, remote failure, heartbeats, and typed event subscriptions. The server shows handler work, event publication, and subscriber delivery counts. Changing the server theme publishes a `ThemeChanged` event so connected clients follow it; clients also request a theme snapshot when connecting so reconnects cannot miss earlier changes. Both apps use native light and dark themes; no commercial or third-party WPF control suite is required.
 
 ## Tests
 

@@ -1,0 +1,19 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <ProjectReference Include="..\IpcDemo.Contracts\IpcDemo.Contracts.csproj" />
+    <ProjectReference Include="..\Liftoff.Ipc\Liftoff.Ipc.csproj" />
+    <Compile Include="..\IpcDemo.Wpf.Shared\PresentationModels.cs" Link="Presentation\PresentationModels.cs" />
+    <Page Include="..\IpcDemo.Wpf.Shared\Controls.xaml" Link="Themes\Controls.xaml" />
+  </ItemGroup>
+
+</Project>

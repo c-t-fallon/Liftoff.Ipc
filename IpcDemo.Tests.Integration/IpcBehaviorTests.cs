@@ -67,6 +67,22 @@ public sealed class IpcBehaviorTests
     }
 
     [Fact]
+    public async Task Server_can_stop_after_rapid_client_disconnects()
+    {
+        var session = IpcSession.Create();
+        await using var server = IpcServer.Create(session);
+        await server.StartAsync();
+
+        for (var iteration = 0; iteration < 20; iteration++)
+        {
+            var client = await IpcClient.ConnectAsync(session);
+            await client.DisposeAsync();
+        }
+
+        await server.DisposeAsync();
+    }
+
+    [Fact]
     public async Task Events_are_delivered_only_while_subscribed()
     {
         await using var app = await TestApplication.StartAsync();

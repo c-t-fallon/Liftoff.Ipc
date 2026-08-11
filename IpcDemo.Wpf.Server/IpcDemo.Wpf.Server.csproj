@@ -1,0 +1,29 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <ProjectReference Include="..\IpcDemo.Contracts\IpcDemo.Contracts.csproj" />
+    <ProjectReference Include="..\Liftoff.Ipc\Liftoff.Ipc.csproj" />
+    <ProjectReference Include="..\IpcDemo.Wpf.Client\IpcDemo.Wpf.Client.csproj" ReferenceOutputAssembly="false" />
+    <Compile Include="..\IpcDemo.Wpf.Shared\PresentationModels.cs" Link="Presentation\PresentationModels.cs" />
+    <Page Include="..\IpcDemo.Wpf.Shared\Controls.xaml" Link="Themes\Controls.xaml" />
+  </ItemGroup>
+
+  <Target Name="CopyWpfClientOutput" AfterTargets="Build">
+    <ItemGroup>
+      <_WpfClientOutput Include="..\IpcDemo.Wpf.Client\bin\$(Configuration)\$(TargetFramework)\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_WpfClientOutput)"
+          DestinationFiles="@(_WpfClientOutput->'$(OutDir)Client\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

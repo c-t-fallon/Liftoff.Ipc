@@ -26,3 +26,16 @@ public sealed record ModelChanged(
     [property: DataMember(Order = 1)] int Sequence,
     [property: DataMember(Order = 2)] string ElementName,
     [property: DataMember(Order = 3)] DateTimeOffset ChangedAt) : IIpcEvent;
+
+[DataContract]
+public sealed record GetThemeStateRequest : IIpcRequest<ThemeState>;
+
+[DataContract]
+public sealed record ThemeState(
+    [property: DataMember(Order = 1)] bool IsDark,
+    [property: DataMember(Order = 2)] DateTimeOffset ChangedAt);
+
+[DataContract]
+public sealed record ThemeChanged(
+    [property: DataMember(Order = 1)] bool IsDark,
+    [property: DataMember(Order = 2)] DateTimeOffset ChangedAt) : IIpcEvent;

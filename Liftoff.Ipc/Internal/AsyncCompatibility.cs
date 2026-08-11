@@ -5,12 +5,29 @@ internal static class AsyncCompatibility
     public static Task CancelAsync(CancellationTokenSource source)
     {
 #if NETFRAMEWORK
-        source.Cancel();
+        try
+        {
+            source.Cancel();
+        }
+        catch (AggregateException exception) when (
+            exception.Flatten().InnerExceptions.All(IsClosedHandleIoCancellation))
+        {
+            // .NET Framework named-pipe cancellation can race with pipe disposal.
+            // CancelIoEx then reports a closed SafeHandle even though cancellation
+            // was successfully requested. Preserve every other callback failure.
+        }
+
         return Task.CompletedTask;
 #else
         return source.CancelAsync();
 #endif
     }
+
+#if NETFRAMEWORK
+    private static bool IsClosedHandleIoCancellation(Exception error) =>
+        error is ObjectDisposedException
+        && error.StackTrace?.IndexOf("CancelIoEx", StringComparison.Ordinal) >= 0;
+#endif
 
     public static async Task WaitWithCancellationAsync(
         Task task,
