@@ -12,27 +12,43 @@ The library keeps correlation IDs, acknowledgement timeouts, framing, serializat
 using Liftoff.Ipc;
 ```
 
-## Authenticated sessions
+## Parent/child applications (primary use case)
 
-For parent/child applications, create one authenticated session before launching the child. A session uses an unpredictable pipe name, a 256-bit key, current-user pipe isolation, and a mutual HMAC-SHA256 handshake. The key is never sent over the pipe, and application messages are not accepted until both endpoints authenticate.
+`Liftoff.Ipc` is designed first for applications where a host process owns the server and launches a companion executable as its client. A Revit add-in is a typical example: Revit hosts the server in-process, while an executable distributed with the add-in provides the client UI or performs isolated work.
+
+The recommended lifecycle is:
+
+1. The parent creates a unique authenticated `IpcSession`.
+2. The parent creates and starts the server before launching the child.
+3. The parent adds the session to the child's environment with `ConfigureChildProcess`.
+4. The child reads the inherited session and connects without pipe names, keys, ports, or configuration files supplied by the user.
+5. The application owns child-process supervision and shuts the child down with the parent.
+
+A session uses an unpredictable pipe name, a 256-bit key, current-user pipe isolation, and a mutual HMAC-SHA256 handshake. The key is never sent over the pipe, and application messages are not accepted until both endpoints authenticate.
 
 ```csharp
 var session = IpcSession.Create();
-var child = new ProcessStartInfo("Child.exe");
-session.ConfigureChildProcess(child);
-Process.Start(child);
 
 await using var server = IpcServer.Create(session);
+server.RegisterHandlersFromAssemblyContaining<AnalyzeModelHandler>();
+await server.StartAsync(parentCancellationToken);
+
+var child = new ProcessStartInfo("Child.exe");
+session.ConfigureChildProcess(child);
+using var childProcess = Process.Start(child)
+    ?? throw new InvalidOperationException("The child process did not start.");
 ```
 
-The child reads the session from its inherited environment and may act as either client or server:
+The child reads the session from its inherited environment and connects automatically:
 
 ```csharp
 var session = IpcSession.FromEnvironment();
 await using var client = await IpcClient.ConnectAsync(session);
 ```
 
-Fixed-name overloads remain available for independently configured applications. They restrict access to the current Windows user by default but do not authenticate same-user peers; authenticated `IpcSession` overloads are recommended whenever one process launches the other.
+`Liftoff.Ipc` transports messages but deliberately does not launch, restart, or terminate processes. The parent application decides how the child executable is located and what graceful or forced shutdown policy it needs. The WPF demo includes one practical implementation.
+
+Fixed-name overloads remain available for independently configured applications. They restrict access to the current Windows user by default but do not authenticate same-user peers; authenticated `IpcSession` overloads are recommended whenever one process launches the other. See the [parent/child application guide](docs/PARENT_CHILD.md) for a complete lifecycle, deployment guidance, Revit integration notes, and shutdown considerations.
 
 ## Shared contracts
 
@@ -187,4 +203,4 @@ dotnet test IpcDemo.slnx
 
 The library does not automatically replay an in-flight request after a broken connection. If a connection dies after a destructive command was sent but before its result arrives, the client cannot know whether it executed. Safe retry requires an application-specific idempotency policy.
 
-Likely future production concerns include named-pipe access control, bounded queues/backpressure, structured diagnostics, and optional parent/child process supervision. They are not required by the current public API.
+Likely future production concerns include additional named-pipe access policies, bounded queues/backpressure, and structured diagnostics. Parent/child process supervision intentionally remains an application concern rather than part of the IPC API.
