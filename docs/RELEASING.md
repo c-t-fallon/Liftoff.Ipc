@@ -33,7 +33,7 @@ The policy name is descriptive only; the current convention is `Liftoff.Ipc GitH
 ## Creating a release
 
 1. Choose a version that has never been published to NuGet.org.
-2. Confirm the intended commit is present on `origin/master` and the working tree does not contain release changes that still need to be pushed.
+2. Confirm the intended commit is present on `origin/main` and the working tree does not contain release changes that still need to be pushed.
 3. Run the relevant tests locally when code has changed:
 
    ```powershell
@@ -48,7 +48,7 @@ The policy name is descriptive only; the current convention is `Liftoff.Ipc GitH
    ```powershell
    gh release create v0.2.0 `
      --repo c-t-fallon/Liftoff.Ipc `
-     --target master `
+     --target main `
      --title "Liftoff.Ipc v0.2.0" `
      --generate-notes
    ```
@@ -84,6 +84,6 @@ First determine whether `Publish to NuGet.org` succeeded.
     --yes
   ```
 
-  Verify that the remote tag is gone, then recreate the release from the corrected `master` commit.
+  Verify that the remote tag is gone, then recreate the release from the corrected `main` commit.
 
 Do not bypass failing tests, replace Trusted Publishing with an API key, or move package metadata back into the project file merely to make a release pass. Diagnose the failing workflow step and preserve the release model.
