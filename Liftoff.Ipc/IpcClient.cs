@@ -71,6 +71,10 @@ public sealed class IpcClient : IIpcClient
             cancellationToken);
     }
 
+    public static Task<IpcClient> ConnectFromEnvironmentAsync(
+        CancellationToken cancellationToken = default) =>
+        ConnectAsync(IpcSession.FromEnvironment(), cancellationToken);
+
     public DateTimeOffset? LastHeartbeatAt { get; private set; }
 
     public async Task<TResponse> RequestAsync<TResponse>(

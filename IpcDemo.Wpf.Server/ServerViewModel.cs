@@ -14,7 +14,7 @@ namespace IpcDemo.Wpf.Server;
 public partial class ServerViewModel : ObservableObject, IAsyncDisposable
 {
     private IpcServer? _server;
-    private Process? _childProcess;
+    private IpcChildProcessHost? _childHost;
     private CancellationTokenSource? _publisherLifetime;
     private Task? _publisherTask;
     private readonly object _themeStateGate = new();
@@ -57,57 +57,51 @@ public partial class ServerViewModel : ObservableObject, IAsyncDisposable
     }
 
     [RelayCommand(CanExecute = nameof(CanStart))]
-    private Task StartAsync() => StartCoreAsync(session: null);
+    private Task StartAsync() => StartCoreAsync();
 
     [RelayCommand(CanExecute = nameof(CanStartAndLaunchClient))]
     private async Task StartAndLaunchClientAsync()
     {
-        var session = IpcSession.Create(PipeName);
-        if (!await StartCoreAsync(session))
-        {
-            return;
-        }
-
+        IpcChildProcessHost? host = null;
         try
         {
             var clientPath = FindClientExecutable();
-            var startInfo = new ProcessStartInfo(clientPath)
-            {
-                WorkingDirectory = Path.GetDirectoryName(clientPath)!
-            };
-            session.ConfigureChildProcess(startInfo);
-
-            _childProcess = Process.Start(startInfo)
-                ?? throw new InvalidOperationException("The client process could not be started.");
-            _childProcess.Exited += OnChildProcessExited;
-            _childProcess.EnableRaisingEvents = true;
-            IsClientRunning = true;
-            Add("LAUNCH", "Client process started", $"PID {_childProcess.Id} · authenticated session {session.PipeName}");
+            host = new IpcChildProcessHost(
+                clientPath,
+                options => options.PipeName = PipeName);
+            host.ChildProcessExited += OnChildProcessExited;
+            await host.StartAsync(RegisterHandlers);
+            _childHost = host;
+            BeginPublishing();
+            IsRunning = true;
+            IsClientRunning = host.IsChildProcessRunning;
+            StationLabel = "LISTENING";
+            Add("LISTEN", "Named pipe opened", host.PipeName!);
+            Add("LAUNCH", "Client process started", $"PID {host.ChildProcessId} · authenticated session {host.PipeName}");
         }
         catch (Exception exception)
         {
             Add("ERROR", "Client failed to launch", exception.Message);
-            await StopCoreAsync();
+            StationLabel = "FAULTED";
+            if (host is not null)
+            {
+                host.ChildProcessExited -= OnChildProcessExited;
+                await host.DisposeAsync();
+            }
         }
     }
 
-    private async Task<bool> StartCoreAsync(IpcSession? session)
+    private async Task StartCoreAsync()
     {
         try
         {
-            _server = session is null
-                ? IpcServer.Create(PipeName)
-                : IpcServer.Create(session);
-            _server.RegisterHandler<AnalyzeModelRequest, AnalyzeModelResult>(HandleRequestAsync);
-            _server.RegisterHandler<GetThemeStateRequest, ThemeState>((_, _, _) =>
-                Task.FromResult(GetThemeState()));
+            _server = IpcServer.Create(PipeName);
+            RegisterHandlers(_server);
             await _server.StartAsync();
-            _publisherLifetime = new CancellationTokenSource();
-            _publisherTask = PublishEventsAsync(_publisherLifetime.Token);
+            BeginPublishing();
             IsRunning = true;
             StationLabel = "LISTENING";
             Add("LISTEN", "Named pipe opened", PipeName);
-            return true;
         }
         catch (Exception exception)
         {
@@ -115,8 +109,20 @@ public partial class ServerViewModel : ObservableObject, IAsyncDisposable
             Add("ERROR", "Server failed to start", exception.Message);
             if (_server is not null) await _server.DisposeAsync();
             _server = null;
-            return false;
         }
+    }
+
+    private void RegisterHandlers(IpcServer server)
+    {
+        server.RegisterHandler<AnalyzeModelRequest, AnalyzeModelResult>(HandleRequestAsync);
+        server.RegisterHandler<GetThemeStateRequest, ThemeState>((_, _, _) =>
+            Task.FromResult(GetThemeState()));
+    }
+
+    private void BeginPublishing()
+    {
+        _publisherLifetime = new CancellationTokenSource();
+        _publisherTask = PublishEventsAsync(_publisherLifetime.Token);
     }
 
     [RelayCommand(CanExecute = nameof(CanStop))]
@@ -173,9 +179,11 @@ public partial class ServerViewModel : ObservableObject, IAsyncDisposable
             try
             {
                 await Task.Delay(TimeSpan.FromSeconds(1), token);
-                if (!PublishEvents || _server is null) continue;
+                if (!PublishEvents || !CanPublish) continue;
                 var sequence = ++EventCount;
-                var delivered = await _server.PublishAsync(new ModelChanged(sequence, $"Element-{sequence}", DateTimeOffset.UtcNow), token);
+                var delivered = await PublishAsync(
+                    new ModelChanged(sequence, $"Element-{sequence}", DateTimeOffset.UtcNow),
+                    token);
                 DeliveredCount += delivered;
                 if (delivered > 0) Add("EVENT", $"Element-{sequence}", $"Delivered to {delivered} subscription(s).");
             }
@@ -185,7 +193,7 @@ public partial class ServerViewModel : ObservableObject, IAsyncDisposable
 
     private async void OnThemePropertyChanged(object? sender, PropertyChangedEventArgs eventArgs)
     {
-        if (eventArgs.PropertyName != nameof(ThemeService.IsDark) || _server is null || !IsRunning)
+        if (eventArgs.PropertyName != nameof(ThemeService.IsDark) || !CanPublish || !IsRunning)
         {
             return;
         }
@@ -199,7 +207,7 @@ public partial class ServerViewModel : ObservableObject, IAsyncDisposable
                 state = new ThemeState(Theme.IsDark, _themeChangedAt);
             }
             EventCount++;
-            var delivered = await _server.PublishAsync(
+            var delivered = await PublishAsync(
                 new ThemeChanged(state.IsDark, state.ChangedAt));
             DeliveredCount += delivered;
             Add("THEME", Theme.IsDark ? "Dark theme published" : "Light theme published",
@@ -227,14 +235,31 @@ public partial class ServerViewModel : ObservableObject, IAsyncDisposable
 
     private async Task StopCoreAsync()
     {
-        await StopChildProcessAsync();
         _publisherLifetime?.Cancel();
         if (_publisherTask is not null) await _publisherTask;
+        if (_childHost is not null)
+        {
+            _childHost.ChildProcessExited -= OnChildProcessExited;
+            await _childHost.DisposeAsync();
+            _childHost = null;
+        }
         if (_server is not null) await _server.DisposeAsync();
         _publisherLifetime?.Dispose(); _publisherLifetime = null; _publisherTask = null; _server = null;
         IsRunning = false; StationLabel = "STOPPED"; CurrentWork = "No active request"; CurrentProgress = 0;
         Add("STOP", "Server stopped", "The pipe and active sessions were disposed.");
     }
+
+    private bool CanPublish => _server is not null || _childHost is not null;
+
+    private Task<int> PublishAsync<TEvent>(
+        TEvent data,
+        CancellationToken cancellationToken = default)
+        where TEvent : IIpcEvent =>
+        _childHost is not null
+            ? _childHost.PublishAsync(data, cancellationToken)
+            : _server is not null
+                ? _server.PublishAsync(data, cancellationToken)
+                : Task.FromResult(0);
 
     private static string FindClientExecutable()
     {
@@ -250,65 +275,17 @@ public partial class ServerViewModel : ObservableObject, IAsyncDisposable
                 $"Could not find {fileName}. Build the server project so its Client output folder is populated.");
     }
 
-    private async Task StopChildProcessAsync()
-    {
-        var process = _childProcess;
-        if (process is null)
-        {
-            return;
-        }
-
-        _childProcess = null;
-        IsClientRunning = false;
-        process.Exited -= OnChildProcessExited;
-
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.CloseMainWindow();
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                try
-                {
-                    await process.WaitForExitAsync(timeout.Token);
-                }
-                catch (OperationCanceledException)
-                {
-                    process.Kill(entireProcessTree: true);
-                    await process.WaitForExitAsync();
-                }
-            }
-            Add("CHILD", "Client process stopped", "The child client was closed with the server.");
-        }
-        catch (Exception exception)
-        {
-            Add("ERROR", "Client process could not be stopped", exception.Message);
-        }
-        finally
-        {
-            process.Dispose();
-        }
-    }
-
     private void OnChildProcessExited(object? sender, EventArgs eventArgs)
     {
-        if (sender is not Process process)
+        if (eventArgs is not IpcChildProcessExitedEventArgs exited)
         {
             return;
         }
 
         Application.Current.Dispatcher.BeginInvoke(() =>
         {
-            if (!ReferenceEquals(_childProcess, process))
-            {
-                return;
-            }
-
-            _childProcess = null;
             IsClientRunning = false;
-            process.Exited -= OnChildProcessExited;
-            Add("CHILD", "Client process exited", $"PID {process.Id} closed independently.");
-            process.Dispose();
+            Add("CHILD", "Client process exited", $"PID {exited.ProcessId} closed independently with code {exited.ExitCode}.");
         });
     }
 
