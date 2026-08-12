@@ -1,51 +1,46 @@
 # Parent/child applications
 
-The primary `Liftoff.Ipc` deployment model is a host application that owns an IPC server and launches a companion executable as its client. For example, a Revit add-in can host the server inside Revit and distribute a separate executable for its user interface or isolated work.
+The primary `Liftoff.Ipc` deployment model is a host application that owns an IPC server and launches a child executable as its client. For example, a Revit add-in can host the server inside Revit and distribute a separate executable for its user interface or isolated work.
 
 In this model, users should not select a pipe, start a listener, exchange a secret, or click a connect button. The parent creates the connection context, passes it only to the child, and owns both processes' lifecycle.
 
 ## Recommended lifecycle
 
-The parent should perform these steps in order:
+`IpcChildProcessHost` performs the standard lifecycle in order:
 
-1. Create an `IpcSession`. Its default pipe name is unique, so separate host instances do not collide.
-2. Create the `IpcServer` from that session and register the application's handlers.
-3. Start the server. Starting first ensures the listener is ready before the child attempts to connect.
-4. Create the child's `ProcessStartInfo` and call `session.ConfigureChildProcess(startInfo)`.
-5. Launch and retain the returned `Process` so the application can observe and stop the child.
-6. On normal parent shutdown, request a graceful child exit and apply the application's timeout or forced-termination policy.
+1. Create a unique authenticated `IpcSession`.
+2. Create the `IpcServer` and register the application's handlers.
+3. Start the server so its listener is ready before the child connects.
+4. Add the session to a new `ProcessStartInfo` and launch the child.
+5. Track independent child exit.
+6. On shutdown, close the child's main window, wait for the configured grace period, and force termination if necessary.
 
 ```csharp
-using System.Diagnostics;
 using Liftoff.Ipc;
 
-var session = IpcSession.Create();
+await using var host = new IpcChildProcessHost(
+    childExecutablePath,
+    options => options.ShutdownTimeout = TimeSpan.FromSeconds(2));
 
-await using var server = IpcServer.Create(session);
-server.RegisterHandlersFromAssemblyContaining<AnalyzeModelHandler>();
-await server.StartAsync(parentCancellationToken);
+await host.StartAsync(server =>
+    server.RegisterHandlersFromAssemblyContaining<AnalyzeModelHandler>(),
+    parentCancellationToken);
 
-var startInfo = new ProcessStartInfo(childExecutablePath)
-{
-    WorkingDirectory = Path.GetDirectoryName(childExecutablePath)!
-};
-
-session.ConfigureChildProcess(startInfo);
-
-using var child = Process.Start(startInfo)
-    ?? throw new InvalidOperationException("The child process did not start.");
+// Use RestartAsync when replacing an existing child is intentional.
+await host.RestartAsync(server =>
+    server.RegisterHandlersFromAssemblyContaining<AnalyzeModelHandler>());
 ```
 
-`ConfigureChildProcess` sets `UseShellExecute` to `false` and places the session's pipe name and authentication key in the new process's environment. There is no command-line secret to log or configuration file to distribute. The same `IpcSession` instance must be used to create the parent endpoint and configure the child.
+The string constructor uses the executable's directory as its working directory. A `Func<ProcessStartInfo>` constructor is also available for arguments and other process settings. `IpcChildProcessHostOptions` configures the pipe name, server options, executable validation, shutdown timeout, and process-tree termination.
+
+The host sets `UseShellExecute` to `false` and places the session's pipe name and authentication key in the new process's environment. There is no command-line secret to log or configuration file to distribute.
 
 The child reconstructs the session and connects:
 
 ```csharp
 using Liftoff.Ipc;
 
-var session = IpcSession.FromEnvironment();
-await using var client = await IpcClient.ConnectAsync(
-    session,
+await using var client = await IpcClient.ConnectFromEnvironmentAsync(
     applicationStoppingToken);
 ```
 
@@ -84,8 +79,8 @@ An `IpcSession` establishes endpoint identity; it does not encrypt application p
 For a Revit deployment, the usual ownership is:
 
 - Revit loads the add-in and hosts the `IpcServer`.
-- The add-in creates one session for each companion executable it launches.
-- The companion executable calls `IpcSession.FromEnvironment` and connects as the client.
+- The add-in creates one `IpcChildProcessHost` for each child executable it launches.
+- The child executable calls `IpcClient.ConnectFromEnvironmentAsync` and connects as the client.
 - Both projects reference a small shared contracts assembly and the build of `Liftoff.Ipc` appropriate for their target framework.
 
 The endpoints may target different supported frameworks. For example, a Revit 2024 add-in can use .NET Framework 4.8 while its child executable uses .NET 8, provided both sides deploy compatible copies of the same contracts assembly.
@@ -94,20 +89,43 @@ IPC handlers do not execute on Revit's UI/API thread. A handler that needs the R
 
 Revit can open and close multiple documents during one process lifetime. Choose session ownership deliberately: an application-scoped child can share the add-in's lifetime, while document-specific children should be stopped when their owning document closes.
 
-## Process supervision
+## Publication and lifecycle
 
-`Liftoff.Ipc` does not start, restart, or terminate the child. Those policies depend on the host application and belong beside its process-launch code.
+The host exposes both strong and transient publication paths:
 
-A typical normal-shutdown sequence is:
+```csharp
+var delivered = await host.PublishAsync(modelChanged, cancellationToken);
+await host.PublishBestEffortAsync(selectionChanged);
+```
+
+`PublishAsync` reports lifecycle and publication failures. `PublishBestEffortAsync` is a no-op while stopped and ignores expected disconnect or disposal races, while allowing unexpected serialization and programming errors to propagate.
+
+The default normal-shutdown sequence is:
 
 1. Ask the child to close, or call `Process.CloseMainWindow` for a desktop child.
 2. Allow a short grace period with `WaitForExitAsync`.
 3. If the child does not exit, terminate it according to the host application's policy.
 4. Dispose the server to disconnect any remaining IPC session and release the pipe.
 
-Holding a `Process` object does not make Windows terminate the child if the parent crashes or is forcibly killed. Applications that require crash-coupled lifetime should additionally use a Windows Job Object or another platform-specific supervisor. That stronger guarantee is separate from the IPC connection itself.
+`ChildProcessExited` reports an independently exiting child's process ID and exit code. The IPC server remains running until the host is stopped or restarted, allowing the parent to decide whether an unexpected exit should merely update UI state or trigger recovery.
 
-The WPF server demo shows a lightweight policy: it starts the authenticated server, launches the client from its bundled output folder, tracks exit events, requests a graceful close when the server stops, and terminates the process tree after a short timeout.
+For policies beyond this standard lifecycle, use `IpcSession`, `IpcServer`, and `IpcClient` directly. Holding a process handle does not make Windows terminate the child if the parent crashes or is forcibly killed. Applications that require crash-coupled lifetime should additionally use a Windows Job Object or another platform-specific supervisor.
+
+### Low-level lifecycle
+
+The underlying session API remains available for custom launchers:
+
+```csharp
+var session = IpcSession.Create();
+await using var server = IpcServer.Create(session);
+server.RegisterHandlersFromAssemblyContaining<AnalyzeModelHandler>();
+await server.StartAsync();
+
+var startInfo = new ProcessStartInfo(childExecutablePath);
+session.ConfigureChildProcess(startInfo);
+using var child = Process.Start(startInfo)
+    ?? throw new InvalidOperationException("The child process did not start.");
+```
 
 ## Deployment
 
