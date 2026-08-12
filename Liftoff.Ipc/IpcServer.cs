@@ -210,38 +210,68 @@ public sealed class IpcServer : IDisposable
 
     private async Task RunAsync(CancellationToken cancellationToken)
     {
-        while (!cancellationToken.IsCancellationRequested)
+        var sessionTasks = new List<Task>();
+        try
         {
-            using var pipe = CreatePipe();
-
-            await pipe.WaitForConnectionAsync(cancellationToken);
-            if (_authenticationKey is not null)
+            while (!cancellationToken.IsCancellationRequested)
             {
+                NamedPipeServerStream? pipe = CreatePipe();
                 try
                 {
-                    await IpcAuthenticator.AuthenticateServerAsync(
-                        pipe,
-                        _authenticationKey,
-                        _options.AuthenticationTimeout,
-                        cancellationToken);
-                }
-                catch (IpcAuthenticationException) when (!cancellationToken.IsCancellationRequested)
-                {
-                    continue;
-                }
-            }
+                    await pipe.WaitForConnectionAsync(cancellationToken);
+                    if (_authenticationKey is not null)
+                    {
+                        try
+                        {
+                            await IpcAuthenticator.AuthenticateServerAsync(
+                                pipe,
+                                _authenticationKey,
+                                _options.AuthenticationTimeout,
+                                cancellationToken);
+                        }
+                        catch (IpcAuthenticationException) when (!cancellationToken.IsCancellationRequested)
+                        {
+                            continue;
+                        }
+                    }
 
-            var sessionId = Guid.NewGuid();
-            var session = new ClientSession(pipe, _handlers, _options.HeartbeatInterval);
-            _sessions.TryAdd(sessionId, session);
-            try
-            {
-                await session.RunAsync(cancellationToken);
+                    var sessionId = Guid.NewGuid();
+                    var session = new ClientSession(pipe, _handlers, _options.HeartbeatInterval);
+                    _sessions.TryAdd(sessionId, session);
+                    sessionTasks.RemoveAll(task => task.Status == TaskStatus.RanToCompletion);
+                    sessionTasks.Add(RunClientSessionAsync(
+                        sessionId,
+                        session,
+                        pipe,
+                        cancellationToken));
+                    pipe = null;
+                }
+                finally
+                {
+                    pipe?.Dispose();
+                }
             }
-            finally
-            {
-                _sessions.TryRemove(sessionId, out _);
-            }
+        }
+        finally
+        {
+            await Task.WhenAll(sessionTasks).ConfigureAwait(false);
+        }
+    }
+
+    private async Task RunClientSessionAsync(
+        Guid sessionId,
+        ClientSession session,
+        NamedPipeServerStream pipe,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await session.RunAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _sessions.TryRemove(sessionId, out _);
+            pipe.Dispose();
         }
     }
 
@@ -560,7 +590,7 @@ public sealed class IpcServer : IDisposable
             return new NamedPipeServerStream(
                 _pipeName,
                 PipeDirection.InOut,
-                maxNumberOfServerInstances: 1,
+                maxNumberOfServerInstances: NamedPipeServerStream.MaxAllowedServerInstances,
                 PipeTransmissionMode.Byte,
                 pipeOptions);
         }
@@ -577,7 +607,7 @@ public sealed class IpcServer : IDisposable
         return new NamedPipeServerStream(
             _pipeName,
             PipeDirection.InOut,
-            maxNumberOfServerInstances: 1,
+            maxNumberOfServerInstances: NamedPipeServerStream.MaxAllowedServerInstances,
             PipeTransmissionMode.Byte,
             pipeOptions,
             inBufferSize: 0,
@@ -592,7 +622,7 @@ public sealed class IpcServer : IDisposable
         return new NamedPipeServerStream(
             _pipeName,
             PipeDirection.InOut,
-            maxNumberOfServerInstances: 1,
+            maxNumberOfServerInstances: NamedPipeServerStream.MaxAllowedServerInstances,
             PipeTransmissionMode.Byte,
             pipeOptions);
 #endif

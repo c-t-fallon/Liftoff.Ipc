@@ -104,6 +104,8 @@ await server.StartAsync(cancellationToken);
 
 Handler discovery scans only concrete implementations of `IIpcRequestHandler<TRequest,TResponse>`. Explicit instance and delegate registration are also available. A handler factory can integrate any dependency-injection container without making the library depend on one.
 
+The server accepts multiple clients simultaneously. Each connection has its own request queue, cancellation state, and event subscriptions, while registered handlers are shared across all connections.
+
 ## Client
 
 ```csharp

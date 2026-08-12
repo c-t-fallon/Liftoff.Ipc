@@ -67,6 +67,26 @@ public sealed class IpcBehaviorTests
     }
 
     [Fact]
+    public async Task Server_serves_multiple_clients_simultaneously()
+    {
+        await using var app = await TestApplication.StartAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await using var firstClient = await app.ConnectClientAsync(timeout.Token);
+        await using var secondClient = await app.ConnectClientAsync(timeout.Token);
+
+        var results = await Task.WhenAll(
+            firstClient.RequestAsync(
+                new Analyze("First Client", Steps: 5, DelayMilliseconds: 10),
+                cancellationToken: timeout.Token),
+            secondClient.RequestAsync(
+                new Analyze("Second Client", Steps: 5, DelayMilliseconds: 10),
+                cancellationToken: timeout.Token));
+
+        Assert.Equal("First Client", results[0].ModelName);
+        Assert.Equal("Second Client", results[1].ModelName);
+    }
+
+    [Fact]
     public async Task Server_can_stop_after_rapid_client_disconnects()
     {
         var session = IpcSession.Create();
@@ -105,6 +125,32 @@ public sealed class IpcBehaviorTests
         Assert.Equal(1, whileSubscribed);
         Assert.Equal(0, afterUnsubscription);
         Assert.Equal(eventData, events.Current);
+    }
+
+    [Fact]
+    public async Task Events_are_published_to_all_subscribed_clients()
+    {
+        await using var app = await TestApplication.StartAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await using var firstClient = await app.ConnectClientAsync(timeout.Token);
+        await using var secondClient = await app.ConnectClientAsync(timeout.Token);
+        await using var firstSubscription =
+            await firstClient.SubscribeAsync<ItemChanged>(timeout.Token);
+        await using var secondSubscription =
+            await secondClient.SubscribeAsync<ItemChanged>(timeout.Token);
+        await using var firstEvents = firstSubscription.GetAsyncEnumerator(timeout.Token);
+        await using var secondEvents = secondSubscription.GetAsyncEnumerator(timeout.Token);
+        var firstReceived = firstEvents.MoveNextAsync();
+        var secondReceived = secondEvents.MoveNextAsync();
+        var eventData = new ItemChanged(8, "Door-17");
+
+        var recipients = await app.Server.PublishAsync(eventData, timeout.Token);
+
+        Assert.Equal(2, recipients);
+        Assert.True(await firstReceived);
+        Assert.True(await secondReceived);
+        Assert.Equal(eventData, firstEvents.Current);
+        Assert.Equal(eventData, secondEvents.Current);
     }
 
     [Fact]
@@ -213,8 +259,9 @@ public sealed class IpcBehaviorTests
             return new TestApplication(session, server);
         }
 
-        public Task<IpcClient> ConnectClientAsync() =>
-            IpcClient.ConnectAsync(Session);
+        public Task<IpcClient> ConnectClientAsync(
+            CancellationToken cancellationToken = default) =>
+            IpcClient.ConnectAsync(Session, cancellationToken);
 
         public Task DisposeAsync() => Server.DisposeAsync();
     }
